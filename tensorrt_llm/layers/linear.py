@@ -93,6 +93,7 @@ def _gemm_plugin(input: Tensor,
     plg_creator = trt.get_plugin_registry().get_plugin_creator(
         "Gemm", "1", TRT_LLM_PLUGIN_NAMESPACE)
     assert plg_creator is not None
+    assert plg_creator is not None
 
     if use_fp8:
         assert (

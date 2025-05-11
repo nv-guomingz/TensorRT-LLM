@@ -16,7 +16,7 @@
  */
 #pragma once
 
-#include "copy_sm90_multimem.hpp"
+// #include "copy_sm90_multimem.hpp"
 #include <cute/atom/copy_traits.hpp>
 #include <cute/numeric/integral_ratio.hpp>
 #include <cute/tensor.hpp>

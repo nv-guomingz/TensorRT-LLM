@@ -11,7 +11,9 @@ enable_fp8 = major > 8 or (major == 8 and minor >= 9)
 enable_nvfp4 = major >= 10
 
 quant_and_calib_configs = []
+import pdb
 
+pdb.set_trace()
 if not enable_nvfp4:
     # Example 1: Specify int4 AWQ quantization to QuantConfig.
     # We can skip specifying CalibConfig or leave a None as the default value.

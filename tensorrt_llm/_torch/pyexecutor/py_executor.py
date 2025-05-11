@@ -1613,6 +1613,7 @@ class PyExecutor:
         try:
             outputs = forward(scheduled_requests, self.resource_manager,
                               new_tensors_device)
+            logger.info(1111111111)
             return outputs
         except Exception as e:
             traceback.print_exc()
