@@ -181,6 +181,7 @@ class Tensor(object):
         # dim_range arg is: {M dimension x N profiles}, while self.profiles layout is {N profiles x M dimensions}
         if isinstance(dtype, str):
             dtype = str_dtype_to_trt(dtype)
+            assert dtype is not None
 
         self.profiles = []
 
