@@ -79,7 +79,7 @@ Welcome to TensorRT-LLM's Documentation!
 
    commands/trtllm-bench
    commands/trtllm-build
-   commands/trtllm-serve
+   commands/trtllm-serve/index
 
 
 .. toctree::
