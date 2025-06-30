@@ -194,7 +194,7 @@ class InferenceOptimizer:
 
         cm.info.set_generate_only_batch()
         compiler_kwargs = {
-            "cuda_graph_batch_sizes": self.ad_config.cuda_graph_config.cuda_graph_batch_sizes
+            "cuda_graph_batch_sizes": self.ad_config.cuda_graph_config.batch_sizes
             if hasattr(self.ad_config, "cuda_graph_config")
             and self.ad_config.cuda_graph_config is not None
             else None,
