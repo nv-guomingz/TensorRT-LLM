@@ -63,11 +63,11 @@ def generate_examples():
         '__init__.py', 'quickstart_example.py', 'quickstart_advanced.py',
         'quickstart_multimodal.py', 'star_attention.py'
     }
-    doc_dir = root_dir / "docs/source/examples"
+    doc_dir = root_dir / "docs/source/1.0/examples"
 
     def collect_script_paths(examples_subdir: str) -> list[Path]:
         """Collect Python and shell script paths from an examples subdirectory."""
-        script_dir = root_dir / f"examples/{examples_subdir}"
+        script_dir = root_dir / f"examples/1.0/{examples_subdir}"
         script_paths = list(
             chain(script_dir.glob("*.py"), script_dir.glob("*.sh")))
         return [
@@ -289,8 +289,8 @@ def extract_all_and_eval(file_path):
 def generate_llmapi():
     root_dir = Path(__file__).parent.parent.parent.resolve()
 
-    # Set up destination paths
-    doc_dir = root_dir / "docs/source/llm-api"
+    # Destination paths
+    doc_dir = root_dir / "docs/source/1.0/llm-api"
     doc_dir.mkdir(exist_ok=True)
     doc_path = doc_dir / "reference.rst"
 
