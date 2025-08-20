@@ -12,7 +12,7 @@ from tensorrt_llm.bench.utils.data import create_dataset_from_stream, initialize
 from tensorrt_llm.bench.utils import VALID_QUANT_ALGOS
 from tensorrt_llm.builder import BuildConfig
 from tensorrt_llm._tensorrt_engine import LLM
-from tensorrt_llm.llmapi.llm_utils import QuantConfig
+from tensorrt_llm.llmapi.llm_utils import QuantConfig, CalibConfig
 from tensorrt_llm.logger import logger
 from tensorrt_llm.quantization.mode import QuantAlgo
 from tensorrt_llm.bench.build.dataclasses import ModelConfig, NemotronHybridConfig
@@ -283,7 +283,13 @@ def build_command(
         target_input_len = metadata.avg_isl
         target_output_len = metadata.avg_osl
         logger.info(metadata.get_summary_for_print())
-
+        import os
+        if os.path.isdir(dataset_path):
+            calib_config = CalibConfig(calib_dataset=str(dataset_path.parent))
+        else:
+            calib_config = CalibConfig(calib_dataset=str(dataset_path))
+    else:
+        calib_config = None
     # Use user-specified engine settings if provided.
     if max_batch_size and max_num_tokens:
         logger.info("Use user-provided max batch size and max num tokens for "
@@ -331,6 +337,7 @@ def build_command(
               pipeline_parallel_size=pp_size,
               build_config=build_config,
               quant_config=quant_config,
+              calib_config=calib_config,
               workspace=str(bench_env.workspace),
               load_format=load_format,
               trust_remote_code=trust_remote_code)

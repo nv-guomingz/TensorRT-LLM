@@ -407,11 +407,14 @@ def get_calib_dataloader(dataset_name_or_dir="cnn_dailymail",
             trust_remote_code=True,
         )
         dataset = dataset["article"][:calib_size]
-    elif os.path.isdir(dataset_name_or_dir):
+    elif os.path.isdir(dataset_name_or_dir) or os.path.isfile(
+            dataset_name_or_dir):
         logger.info(
             f"Recognized local dataset repo {dataset_name_or_dir} for calibration; "
             "assuming the calibration data are in the train split and text column."
         )
+        if os.path.isfile(dataset_name_or_dir):
+            dataset_name_or_dir = os.path.dirname(dataset_name_or_dir)
         dataset = load_dataset(dataset_name_or_dir,
                                split="train",
                                trust_remote_code=True)
