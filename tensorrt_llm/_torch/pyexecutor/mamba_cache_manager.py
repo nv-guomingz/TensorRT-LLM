@@ -46,8 +46,9 @@ from tensorrt_llm.llmapi.llm_args import KvCacheConfig
 from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.runtime.kv_cache_manager_v2 import (AttentionLayerConfig,
-                                                      BufferConfig,
-                                                      CacheTierConfig)
+                                                      BatchDesc, BufferConfig,
+                                                      CacheTierConfig,
+                                                      KVCacheDesc)
 from tensorrt_llm.runtime.kv_cache_manager_v2 import \
     KVCacheManagerConfig as KVCacheManagerConfigPy
 from tensorrt_llm.runtime.kv_cache_manager_v2 import LayerId, SsmLayerConfig
@@ -2653,6 +2654,41 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
             return None
         return super()._get_value_role_for_pool(pool_id)
 
+    def _num_ssm_snapshots_for_capacity(
+        self,
+        capacity: int,
+        kv_cache_config: KvCacheConfig,
+    ) -> int:
+        if capacity <= 0 or not kv_cache_config.enable_block_reuse:
+            return 0
+
+        interval = self._mamba_state_cache_interval
+        num_snapshots = 0
+        if interval is not None and interval > 0:
+            num_snapshots += capacity // interval
+
+        if kv_cache_config.mamba_save_last_snapshot:
+            if interval is None or interval <= 0 or capacity % interval != 0:
+                num_snapshots += 1
+
+        return num_snapshots
+
+    def _ssm_slots_per_request_for_typical_batch(
+        self,
+        capacity: int,
+        kv_cache_config: KvCacheConfig,
+    ) -> List[int]:
+        total_live_state_slots = self.max_batch_size
+        total_snapshot_slots = self._num_ssm_snapshots_for_capacity(
+            capacity, kv_cache_config)
+        total_slots = total_live_state_slots + total_snapshot_slots
+        slots_per_request, extra_slots = divmod(total_slots,
+                                                self.max_batch_size)
+        return [
+            slots_per_request + (1 if i < extra_slots else 0)
+            for i in range(self.max_batch_size)
+        ]
+
     def _build_cache_config(
         self,
         kv_cache_config: KvCacheConfig,
@@ -2707,6 +2743,9 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
                         num_sink_tokens=None,
                     ))
 
+        typical_ssm_slots = self._ssm_slots_per_request_for_typical_batch(
+            self.max_seq_len, kv_cache_config)
+
         return KVCacheManagerConfigPy(
             tokens_per_block=tokens_per_block,
             vocab_size=vocab_size,
@@ -2714,6 +2753,20 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
             max_util_for_resume=kv_cache_config.max_util_for_resume,
             layers=layers,
             enable_partial_reuse=kv_cache_config.enable_partial_reuse,
+            constraints=[
+                BatchDesc([
+                    KVCacheDesc(capacity=2049,
+                                history_length=2048,
+                                ssm_snapshots=1)
+                    for _ in range(self.max_batch_size)
+                ])
+            ],
+            typical_step=BatchDesc([
+                KVCacheDesc(capacity=self.max_seq_len,
+                            history_length=max(0, self.max_seq_len - 1),
+                            ssm_snapshots=typical_ssm_slots[i])
+                for i in range(self.max_batch_size)
+            ]),
             ssm_reuse_interval=self._mamba_state_cache_interval,
             mamba_save_last_snapshot=kv_cache_config.mamba_save_last_snapshot,
         )

@@ -2234,7 +2234,10 @@ class KVCacheManagerV2(BaseResourceManager):
             for window_size in sorted(windows)
         }
 
-        pool_group_ids = sorted(set(windows_by_pool_group) | set(pool_group_deltas))
+        all_pool_group_ids = set(range(len(primary_stats)))
+        pool_group_ids = sorted(
+            all_pool_group_ids | set(windows_by_pool_group) | set(pool_group_deltas)
+        )
         stats_by_pool_group = {
             pool_group_id: self._build_pool_group_iteration_stats(
                 pool_group_id,
