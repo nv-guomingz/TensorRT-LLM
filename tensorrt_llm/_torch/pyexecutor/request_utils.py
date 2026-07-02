@@ -528,8 +528,8 @@ class RequestBroadcaster:
             new_requests, "py_disaggregated_params"
         )
         py_lora_path = collect_py_objects_from_requests(new_requests, "py_lora_path")
-        py_block_reuse_stable_token_count = collect_py_objects_from_requests(
-            new_requests, "py_block_reuse_stable_token_count"
+        py_reusable_prompt_len = collect_py_objects_from_requests(
+            new_requests, "py_reusable_prompt_len"
         )
 
         return tuple(
@@ -542,7 +542,7 @@ class RequestBroadcaster:
                     py_num_logprobs,
                     py_disaggregated_params,
                     py_lora_path,
-                    py_block_reuse_stable_token_count,
+                    py_reusable_prompt_len,
                 ],
             )
         )

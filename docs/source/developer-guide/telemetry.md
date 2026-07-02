@@ -25,7 +25,7 @@ unset or when the safety sanitizer rejects the runtime value.
 
 ### `TorchLlmArgs`
 
-237 captured fields.
+235 captured fields.
 
 | Captured key | Annotation | Kind | Converter | Allowed values |
 |--------------|------------|------|-----------|----------------|
@@ -95,10 +95,8 @@ unset or when the safety sanitizer rejects the runtime value.
 | `kv_cache_config.attention_dp_events_gather_period_ms` | `<class 'int'>` | `value` |  |  |
 | `kv_cache_config.copy_on_partial_reuse` | `<class 'bool'>` | `value` |  |  |
 | `kv_cache_config.cross_kv_cache_fraction` | `Optional[float]` | `value` |  |  |
-| `kv_cache_config.disk_cache_size` | `Optional[Annotated[int, Ge(ge=0)]]` | `value` |  |  |
 | `kv_cache_config.dtype` | `<class 'str'>` | `categorical` | allowlist | `auto`, `float16`, `bfloat16`, `float32`, `fp8`, `nvfp4` |
 | `kv_cache_config.enable_block_reuse` | `<class 'bool'>` | `value` |  |  |
-| `kv_cache_config.enable_kv_pool_rebalance` | `<class 'bool'>` | `value` |  |  |
 | `kv_cache_config.enable_partial_reuse` | `<class 'bool'>` | `value` |  |  |
 | `kv_cache_config.event_buffer_max_size` | `<class 'int'>` | `value` |  |  |
 | `kv_cache_config.free_gpu_memory_fraction` | `Optional[float]` | `value` |  |  |
@@ -269,7 +267,7 @@ unset or when the safety sanitizer rejects the runtime value.
 
 ### `TrtLlmArgs`
 
-263 captured fields.
+261 captured fields.
 
 | Captured key | Annotation | Kind | Converter | Allowed values |
 |--------------|------------|------|-----------|----------------|
@@ -386,10 +384,8 @@ unset or when the safety sanitizer rejects the runtime value.
 | `kv_cache_config.attention_dp_events_gather_period_ms` | `<class 'int'>` | `value` |  |  |
 | `kv_cache_config.copy_on_partial_reuse` | `<class 'bool'>` | `value` |  |  |
 | `kv_cache_config.cross_kv_cache_fraction` | `Optional[float]` | `value` |  |  |
-| `kv_cache_config.disk_cache_size` | `Optional[Annotated[int, Ge(ge=0)]]` | `value` |  |  |
 | `kv_cache_config.dtype` | `<class 'str'>` | `categorical` | allowlist | `auto`, `float16`, `bfloat16`, `float32`, `fp8`, `nvfp4` |
 | `kv_cache_config.enable_block_reuse` | `<class 'bool'>` | `value` |  |  |
-| `kv_cache_config.enable_kv_pool_rebalance` | `<class 'bool'>` | `value` |  |  |
 | `kv_cache_config.enable_partial_reuse` | `<class 'bool'>` | `value` |  |  |
 | `kv_cache_config.event_buffer_max_size` | `<class 'int'>` | `value` |  |  |
 | `kv_cache_config.free_gpu_memory_fraction` | `Optional[float]` | `value` |  |  |

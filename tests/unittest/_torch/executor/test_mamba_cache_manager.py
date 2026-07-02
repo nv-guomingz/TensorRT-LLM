@@ -403,13 +403,11 @@ def test_v2_hybrid_prepare_expect_snapshot_points():
     )
     mgr.tokens_per_block = 32
     mgr._mamba_state_cache_interval = 64
-    request = SimpleNamespace(prompt_len=150, expect_chunking_points=[32])
+    request = SimpleNamespace(prompt_len=150)
 
-    mgr.prepare_expect_chunking_points([request])
+    mgr.prepare_expect_snapshot_points([request])
 
     assert request.expect_snapshot_points == [64, 128, 150]
-    assert request.expect_chunking_points is None
-    assert request.py_block_reuse_commit_limit == 150
 
 
 def test_v2_hybrid_prepare_expect_snapshot_points_save_last_only():
@@ -421,13 +419,11 @@ def test_v2_hybrid_prepare_expect_snapshot_points_save_last_only():
     )
     mgr.tokens_per_block = 32
     mgr._mamba_state_cache_interval = 0
-    request = SimpleNamespace(prompt_len=150, expect_chunking_points=None)
+    request = SimpleNamespace(prompt_len=150)
 
-    mgr.prepare_expect_chunking_points([request])
+    mgr.prepare_expect_snapshot_points([request])
 
     assert request.expect_snapshot_points == [150]
-    assert request.expect_chunking_points is None
-    assert request.py_block_reuse_commit_limit == 150
 
 
 def test_v2_hybrid_prepare_expect_snapshot_points_uses_stable_boundary():
@@ -441,21 +437,18 @@ def test_v2_hybrid_prepare_expect_snapshot_points_uses_stable_boundary():
     mgr._mamba_state_cache_interval = 0
     request = SimpleNamespace(
         prompt_len=150,
-        py_block_reuse_stable_token_count=137,
-        expect_chunking_points=None,
+        py_reusable_prompt_len=137,
     )
 
-    mgr.prepare_expect_chunking_points([request])
+    mgr.prepare_expect_snapshot_points([request])
 
     assert request.expect_snapshot_points == [137]
-    assert request.expect_chunking_points is None
-    assert request.py_block_reuse_commit_limit == 137
 
 
 def test_v2_hybrid_stable_boundary_becomes_snapshot_point():
     request = SimpleNamespace(
         prompt_len=150,
-        py_block_reuse_stable_token_count=137,
+        py_reusable_prompt_len=137,
     )
 
     assert _calc_context_stop_positions_for_request(
@@ -463,21 +456,23 @@ def test_v2_hybrid_stable_boundary_becomes_snapshot_point():
     ) == [137]
 
 
-def test_v2_block_reuse_commit_limit_uses_request_field():
+def test_v2_block_reuse_commit_limit_uses_stable_boundary_when_last_snapshot_enabled():
     mgr = object.__new__(KVCacheManagerV2)
+    mgr.kv_cache_config = KvCacheConfig(mamba_save_last_snapshot=True)
     request = SimpleNamespace(
         prompt_len=150,
-        py_block_reuse_commit_limit=137,
+        py_reusable_prompt_len=137,
     )
 
     assert mgr._get_block_reuse_commit_limit(request) == 137
 
 
-def test_v2_block_reuse_commit_limit_ignores_stable_boundary_without_request_field():
+def test_v2_block_reuse_commit_limit_ignores_stable_boundary_when_last_snapshot_disabled():
     mgr = object.__new__(KVCacheManagerV2)
+    mgr.kv_cache_config = KvCacheConfig(mamba_save_last_snapshot=False)
     request = SimpleNamespace(
         prompt_len=150,
-        py_block_reuse_stable_token_count=137,
+        py_reusable_prompt_len=137,
     )
 
     assert mgr._get_block_reuse_commit_limit(request) == 150
@@ -487,15 +482,16 @@ def test_v2_block_reuse_commit_saves_ssm_snapshot_at_snapshot_point():
     mgr = object.__new__(KVCacheManagerV2)
     mgr.enable_block_reuse = True
     mgr.is_draft = False
+    mgr.kv_cache_config = KvCacheConfig(mamba_save_last_snapshot=True)
     mgr._augment_tokens_for_block_reuse = lambda tokens, request, start, end: tokens[start:end]
-    mgr._log_block_reuse_commit = MagicMock()
+    mgr._record_block_reuse_commit = MagicMock()
     mgr._mark_context_position_as_history = MagicMock()
 
     token_ids = list(range(150))
     request = SimpleNamespace(
         prompt_len=150,
         context_current_position=137,
-        py_block_reuse_commit_limit=137,
+        py_reusable_prompt_len=137,
         expect_snapshot_points=[137],
         is_dummy_request=False,
         is_dummy=False,
@@ -511,22 +507,21 @@ def test_v2_block_reuse_commit_saves_ssm_snapshot_at_snapshot_point():
     mgr.try_commit_blocks_for_reuse(request, kv_cache)
 
     kv_cache.commit.assert_called_once_with(token_ids[:137], save_ssm_snapshot=True)
+    mgr._record_block_reuse_commit.assert_called_once_with(request, 0, 137)
     kv_cache.stop_committing.assert_not_called()
     mgr._mark_context_position_as_history.assert_called_once_with(request, kv_cache)
 
 
-def test_v2_hybrid_prepare_expect_chunking_points_clears_when_reuse_disabled():
+def test_v2_hybrid_prepare_expect_snapshot_points_clears_when_reuse_disabled():
     mgr = object.__new__(KVCacheManagerV2MambaHybridCacheManager)
     mgr.kv_cache_config = KvCacheConfig(enable_block_reuse=False)
     mgr.tokens_per_block = 32
     mgr._mamba_state_cache_interval = 64
-    request = SimpleNamespace(prompt_len=150, expect_chunking_points=[64])
+    request = SimpleNamespace(prompt_len=150)
 
-    mgr.prepare_expect_chunking_points([request])
+    mgr.prepare_expect_snapshot_points([request])
 
     assert request.expect_snapshot_points is None
-    assert request.expect_chunking_points is None
-    assert request.py_block_reuse_commit_limit == 150
 
 
 @skip_no_cuda

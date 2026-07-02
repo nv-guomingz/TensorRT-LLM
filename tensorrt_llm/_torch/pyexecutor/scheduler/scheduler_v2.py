@@ -634,10 +634,7 @@ class KVCacheV2Scheduler(RequestScheduler):
 
     @staticmethod
     def _get_force_chunk_points(req: LlmRequest) -> list[int] | tuple[int, ...] | None:
-        points = getattr(req, "expect_snapshot_points", None)
-        if points is None:
-            points = getattr(req, "expect_chunking_points", None)
-        return points
+        return getattr(req, "expect_snapshot_points", None)
 
     def _force_chunk_size(self, req: LlmRequest, context_remaining: int) -> int:
         points = self._get_force_chunk_points(req)

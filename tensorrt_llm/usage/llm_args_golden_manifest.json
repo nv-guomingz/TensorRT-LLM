@@ -509,13 +509,6 @@
       "path": "kv_cache_config.cross_kv_cache_fraction"
     },
     {
-      "allowed_values": [],
-      "annotation": "Optional[Annotated[int, Ge(ge=0)]]",
-      "converter": "",
-      "kind": "value",
-      "path": "kv_cache_config.disk_cache_size"
-    },
-    {
       "allowed_values": [
         "auto",
         "float16",
@@ -535,13 +528,6 @@
       "converter": "",
       "kind": "value",
       "path": "kv_cache_config.enable_block_reuse"
-    },
-    {
-      "allowed_values": [],
-      "annotation": "<class 'bool'>",
-      "converter": "",
-      "kind": "value",
-      "path": "kv_cache_config.enable_kv_pool_rebalance"
     },
     {
       "allowed_values": [],
@@ -2786,13 +2772,6 @@
       "path": "kv_cache_config.cross_kv_cache_fraction"
     },
     {
-      "allowed_values": [],
-      "annotation": "Optional[Annotated[int, Ge(ge=0)]]",
-      "converter": "",
-      "kind": "value",
-      "path": "kv_cache_config.disk_cache_size"
-    },
-    {
       "allowed_values": [
         "auto",
         "float16",
@@ -2812,13 +2791,6 @@
       "converter": "",
       "kind": "value",
       "path": "kv_cache_config.enable_block_reuse"
-    },
-    {
-      "allowed_values": [],
-      "annotation": "<class 'bool'>",
-      "converter": "",
-      "kind": "value",
-      "path": "kv_cache_config.enable_kv_pool_rebalance"
     },
     {
       "allowed_values": [],

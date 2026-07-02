@@ -33,7 +33,6 @@ from .._utils import (global_mpi_rank, global_mpi_size, mpi_comm, mpi_rank,
                       nvtx_range_debug)
 from ..bindings import executor as tllm
 from ..builder import ConfigEncoder, Engine, EngineConfig
-from ..llmapi.block_reuse import get_block_reuse_stable_token_count
 from ..llmapi.llm_args import BaseLlmArgs, ExecutorMemoryType, PybindMirror
 from ..llmapi.tokenizer import TokenizerBase
 from ..llmapi.tracer import global_tracer
@@ -605,11 +604,8 @@ class BaseWorker(GenerationExecutor):
             executor_request.py_logprobs_mode = request.sampling_params.logprobs_mode
             executor_request.py_logprobs_simple_format = (
                 request.sampling_params.logprobs_simple_format)
-            block_reuse_stable_token_count = get_block_reuse_stable_token_count(
-                request.trace_headers)
-            if block_reuse_stable_token_count is not None:
-                executor_request.py_block_reuse_stable_token_count = (
-                    block_reuse_stable_token_count)
+            if request.reusable_prompt_len is not None:
+                executor_request.py_reusable_prompt_len = request.reusable_prompt_len
 
             # here we add executor_request.py_disaggregated_params= request.disaggregated_params for python cache transceiver
             if self._is_pytorch_backend and request.disaggregated_params is not None:

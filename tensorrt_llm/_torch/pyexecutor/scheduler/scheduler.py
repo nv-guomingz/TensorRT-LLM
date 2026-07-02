@@ -879,10 +879,7 @@ class PyMicroBatchScheduler(MicroBatchScheduler):
 
     @staticmethod
     def _get_force_chunk_points(req: LlmRequest):
-        points = getattr(req, "expect_snapshot_points", None)
-        if points is None:
-            points = getattr(req, "expect_chunking_points", None)
-        return points
+        return getattr(req, "expect_snapshot_points", None)
 
     @staticmethod
     def _force_chunk_size(req: LlmRequest, unit_size: int) -> int:

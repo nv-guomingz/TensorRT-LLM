@@ -38,7 +38,6 @@ from tensorrt_llm.inputs.multimodal import MultimodalServerConfig
 from tensorrt_llm.inputs.utils import ConversationMessage, apply_chat_template
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi import MultimodalEncoder, SchedulingParams, tracing
-from tensorrt_llm.llmapi.block_reuse import set_block_reuse_stable_token_count
 from tensorrt_llm.llmapi.disagg_utils import (DisaggClusterConfig,
                                               MetadataServerConfig, ServerRole)
 from tensorrt_llm.llmapi.llm import RequestOutput
@@ -1254,7 +1253,7 @@ class OpenAIServer(_VideoRoutesMixin):
                     self.multimodal_server_config,
                     request_media_io_kwargs=request.media_io_kwargs)
 
-            block_reuse_stable_token_count = None
+            reusable_prompt_len = None
             stable_prompt: Optional[str] = None
             if request.prompt_token_ids is not None:
                 prompt = request.prompt_token_ids
@@ -1275,7 +1274,7 @@ class OpenAIServer(_VideoRoutesMixin):
                         or self.chat_template,
                         chat_template_kwargs=request.chat_template_kwargs or {},
                     )
-                    block_reuse_stable_token_count = _count_text_prompt_tokens(
+                    reusable_prompt_len = _count_text_prompt_tokens(
                         self.tokenizer, stable_prompt,
                         request.add_special_tokens)
                 prompt: str = apply_chat_template(
@@ -1320,8 +1319,7 @@ class OpenAIServer(_VideoRoutesMixin):
             original_trace_headers = (None if raw_request is None else
                                       tracing.extract_trace_headers(
                                           raw_request.headers))
-            trace_headers = set_block_reuse_stable_token_count(
-                original_trace_headers, block_reuse_stable_token_count)
+            trace_headers = original_trace_headers
 
             scheduling_params = SchedulingParams(
                 agent_hierarchy=request.agent_hierarchy)
@@ -1343,6 +1341,7 @@ class OpenAIServer(_VideoRoutesMixin):
                 disaggregated_params=disaggregated_params,
                 cache_salt=request.cache_salt,
                 trace_headers=trace_headers,
+                reusable_prompt_len=reusable_prompt_len,
                 scheduling_params=scheduling_params,
             )
             asyncio.create_task(self.await_disconnected(raw_request, promise))

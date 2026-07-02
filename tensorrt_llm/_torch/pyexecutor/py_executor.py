@@ -4309,10 +4309,10 @@ class PyExecutor:
 
     @nvtx_range("_schedule")
     def _schedule(self):
-        prepare_expect_chunking_points = getattr(
-            self.kv_cache_manager, "prepare_expect_chunking_points", None)
-        if prepare_expect_chunking_points is not None:
-            prepare_expect_chunking_points(self.active_requests)
+        prepare_expect_snapshot_points = getattr(
+            self.kv_cache_manager, "prepare_expect_snapshot_points", None)
+        if prepare_expect_snapshot_points is not None:
+            prepare_expect_snapshot_points(self.active_requests)
 
         scheduler_output = self.scheduler.schedule_request(
             self.active_requests, self.inflight_req_ids)

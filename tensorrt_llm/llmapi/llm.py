@@ -586,6 +586,7 @@ class BaseLLM:
         _postproc_params: Optional[PostprocParams] = None,
         scheduling_params: Optional[SchedulingParams] = None,
         cache_salt: Optional[str] = None,
+        reusable_prompt_len: Optional[int] = None,
         priority: float = DEFAULT_REQUEST_PRIORITY,
     ) -> RequestOutput:
         """Generate output for the given prompt in the asynchronous mode.
@@ -603,6 +604,7 @@ class BaseLLM:
             trace_headers (Mapping[str, str], optional): Trace headers. Defaults to None.
             scheduling_params (tensorrt_llm.scheduling_params.SchedulingParams, optional): Scheduling parameters. Defaults to None.
             cache_salt (str, optional): If specified, KV cache will be salted with the provided string to limit the kv cache reuse to the requests with the same string. Defaults to None.
+            reusable_prompt_len (int, optional): Length of the stable prompt prefix that can be reused. Defaults to None.
             priority (float): The scheduling priority for the request, in the range [0, 1]. Higher values indicate higher priority. Defaults to 0.5.
 
         Returns:
@@ -672,6 +674,7 @@ class BaseLLM:
             multimodal_params=multimodal_params,
             scheduling_params=scheduling_params,
             cache_salt=cache_salt,
+            reusable_prompt_len=reusable_prompt_len,
             arrival_time=arrival_time,
             encoder_input_token_ids=encoder_input_token_ids,
             priority=priority,

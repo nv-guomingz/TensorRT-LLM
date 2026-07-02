@@ -1484,9 +1484,10 @@ class KVCacheManagerV2(BaseResourceManager):
         return True
 
     def _get_block_reuse_commit_limit(self, request: LlmRequest) -> int:
-        commit_limit = getattr(request, "py_block_reuse_commit_limit", None)
-        if isinstance(commit_limit, int) and commit_limit > 0:
-            return min(commit_limit, request.prompt_len)
+        if getattr(self.kv_cache_config, "mamba_save_last_snapshot", False):
+            reusable_prompt_len = getattr(request, "py_reusable_prompt_len", None)
+            if isinstance(reusable_prompt_len, int) and reusable_prompt_len > 0:
+                return min(reusable_prompt_len, request.prompt_len)
         return request.prompt_len
 
     @staticmethod

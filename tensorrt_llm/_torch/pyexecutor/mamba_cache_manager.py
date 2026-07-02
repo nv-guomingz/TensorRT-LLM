@@ -1344,15 +1344,14 @@ def calc_context_stop_positions(prompt_len: int,
     return sorted({pos for pos in stop_positions if 0 < pos <= prompt_len})
 
 
-def _get_request_snapshot_commit_limit(
+def _get_request_snapshot_limit(
     request: LlmRequest,
     save_last_snapshot: bool = False,
 ) -> int:
     if save_last_snapshot:
-        stable_token_count = getattr(request,
-                                     "py_block_reuse_stable_token_count", None)
-        if isinstance(stable_token_count, int) and stable_token_count > 0:
-            return min(stable_token_count, request.prompt_len)
+        reusable_prompt_len = getattr(request, "py_reusable_prompt_len", None)
+        if isinstance(reusable_prompt_len, int) and reusable_prompt_len > 0:
+            return min(reusable_prompt_len, request.prompt_len)
     return request.prompt_len
 
 
@@ -1362,10 +1361,9 @@ def _calc_context_stop_positions_for_request(
     mamba_state_cache_interval: Optional[int],
     save_last_snapshot: bool = False,
 ) -> list[int]:
-    commit_limit = _get_request_snapshot_commit_limit(request,
-                                                      save_last_snapshot)
+    snapshot_limit = _get_request_snapshot_limit(request, save_last_snapshot)
     return calc_context_stop_positions(
-        commit_limit,
+        snapshot_limit,
         tokens_per_block,
         mamba_state_cache_interval,
         save_last_snapshot,
@@ -2507,6 +2505,9 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
         self._mamba_state_cache_interval = (
             kv_cache_config.mamba_state_cache_interval)
         self._mamba_block_reuse_enabled = kv_cache_config.enable_block_reuse
+        # TODO: REMOVE BEFORE MERGING THIS PR. This counter only supports
+        # temporary AgentX block-reuse debugging.
+        self._debug_prepare_resources_call_count = 0
 
         self.pp_layers, _ = get_pp_layers(
             mamba_num_layers + num_layers,
@@ -3102,6 +3103,15 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
 
     def prepare_resources(self, scheduled_batch: ScheduledRequests):
         super().prepare_resources(scheduled_batch)
+        # TODO: REMOVE BEFORE MERGING THIS PR. Temporary debug log for tracking
+        # V2 Mamba block-reuse stats during long AgentX runs.
+        self._debug_prepare_resources_call_count += 1
+        if self._debug_prepare_resources_call_count % 100 == 0:
+            logger.info(
+                "TEMP DEBUG REMOVE BEFORE MERGE: "
+                "KVCacheManagerV2MambaHybridCacheManager prepare_resources "
+                f"call_count={self._debug_prepare_resources_call_count}")
+            self._log_block_reuse_summary()
         if self.local_num_mamba_layers == 0:
             return
         self.requests = (scheduled_batch.context_requests +
@@ -3280,14 +3290,12 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
             )
         return PythonMambaCacheManager.State(conv=conv, temporal=ssm)
 
-    def prepare_expect_chunking_points(self,
+    def prepare_expect_snapshot_points(self,
                                        requests: List[LlmRequest]) -> None:
         """Set absolute context positions where FORCE_CHUNK should save snapshots."""
         if not self.kv_cache_config.enable_block_reuse:
             for request in requests:
                 request.expect_snapshot_points = None
-                request.expect_chunking_points = None
-                request.py_block_reuse_commit_limit = request.prompt_len
             return
 
         interval = self._mamba_state_cache_interval
@@ -3295,16 +3303,11 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
         if (interval is None or interval <= 0) and not save_last_snapshot:
             for request in requests:
                 request.expect_snapshot_points = None
-                request.expect_chunking_points = None
-                request.py_block_reuse_commit_limit = request.prompt_len
             return
 
         for request in requests:
             request.expect_snapshot_points = _calc_context_stop_positions_for_request(
                 request, self.tokens_per_block, interval, save_last_snapshot)
-            request.expect_chunking_points = None
-            request.py_block_reuse_commit_limit = _get_request_snapshot_commit_limit(
-                request, save_last_snapshot)
 
     def calc_next_context_chunk_size(self, request: LlmRequest) -> int:
         prompt_len = request.prompt_len

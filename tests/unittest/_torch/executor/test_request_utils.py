@@ -201,15 +201,15 @@ def test_merge_requests_default(mock_convert):
     assert mock_convert.call_count == 2
 
 
-def test_request_broadcaster_collects_block_reuse_stable_token_count():
+def test_request_broadcaster_collects_reusable_prompt_len():
     request = Mock()
-    request.py_block_reuse_stable_token_count = 65472
+    request.py_reusable_prompt_len = 65472
     request_item = RequestQueueItem(7, request)
 
     broadcaster = RequestBroadcaster(Mock(), Mock())
     py_objects = broadcaster._collect_py_objects([request_item])
 
-    assert ("py_block_reuse_stable_token_count", {7: 65472}) in py_objects
+    assert ("py_reusable_prompt_len", {7: 65472}) in py_objects
 
 
 def test_merge_requests_with_helix_cp_config():

@@ -2,11 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from tensorrt_llm.inputs.utils import apply_chat_template
-from tensorrt_llm.llmapi.block_reuse import (
-    BLOCK_REUSE_STABLE_TOKEN_COUNT_TRACE_KEY,
-    get_block_reuse_stable_token_count,
-    set_block_reuse_stable_token_count,
-)
 from tensorrt_llm.serve.openai_server import _count_text_prompt_tokens
 
 
@@ -48,26 +43,6 @@ class _FakeChatTokenizer:
         return list(range(len(prompt) + (1 if add_special_tokens else 0)))
 
 
-def test_block_reuse_stable_token_count_trace_header_round_trip() -> None:
-    trace_headers = set_block_reuse_stable_token_count({"traceparent": "p"}, 123)
-
-    assert trace_headers == {
-        "traceparent": "p",
-        BLOCK_REUSE_STABLE_TOKEN_COUNT_TRACE_KEY: "123",
-    }
-    assert get_block_reuse_stable_token_count(trace_headers) == 123
-
-
-def test_block_reuse_stable_token_count_ignores_invalid_values() -> None:
-    assert (
-        get_block_reuse_stable_token_count({BLOCK_REUSE_STABLE_TOKEN_COUNT_TRACE_KEY: "0"}) is None
-    )
-    assert (
-        get_block_reuse_stable_token_count({BLOCK_REUSE_STABLE_TOKEN_COUNT_TRACE_KEY: "not-an-int"})
-        is None
-    )
-
-
 def test_count_text_prompt_tokens_matches_request_special_token_mode() -> None:
     tokenizer = _FakeTokenizer()
 
@@ -76,7 +51,7 @@ def test_count_text_prompt_tokens_matches_request_special_token_mode() -> None:
     assert tokenizer.calls == [("prompt", False), ("prompt", True)]
 
 
-def test_stable_token_count_handles_agentx_last_assistant_prompt() -> None:
+def test_reusable_prompt_len_handles_agentx_last_assistant_prompt() -> None:
     tokenizer = _FakeChatTokenizer()
     conversation = [
         {"role": "user", "content": "large shared prefix"},
@@ -100,13 +75,11 @@ def test_stable_token_count_handles_agentx_last_assistant_prompt() -> None:
         add_generation_prompt=True,
         mm_placeholder_counts=mm_placeholder_counts,
     )
-    stable_token_count = _count_text_prompt_tokens(
+    reusable_prompt_len = _count_text_prompt_tokens(
         tokenizer, stable_prompt, add_special_tokens=False
     )
-    trace_headers = set_block_reuse_stable_token_count(None, stable_token_count)
 
     assert full_prompt.startswith(stable_prompt)
     assert full_prompt != stable_prompt
     assert full_prompt.endswith("<|im_start|>assistant\n<think>\n")
-    assert stable_token_count == len(stable_prompt)
-    assert get_block_reuse_stable_token_count(trace_headers) == stable_token_count
+    assert reusable_prompt_len == len(stable_prompt)
