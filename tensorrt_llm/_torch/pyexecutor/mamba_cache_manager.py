@@ -2768,7 +2768,6 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
                 for i in range(self.max_batch_size)
             ]),
             ssm_reuse_interval=self._mamba_state_cache_interval,
-            mamba_save_last_snapshot=kv_cache_config.mamba_save_last_snapshot,
         )
 
     def _build_pool_mapping_tensors(self):

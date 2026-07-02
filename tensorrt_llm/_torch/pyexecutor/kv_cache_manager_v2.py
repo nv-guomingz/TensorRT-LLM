@@ -97,13 +97,6 @@ if TYPE_CHECKING:
     from tensorrt_llm._torch.attention_backend.interface import AttentionMetadata
 
 
-def _safe_debug_attr(obj, name):
-    try:
-        return getattr(obj, name)
-    except Exception as exc:
-        return f"<unavailable:{type(exc).__name__}: {exc}>"
-
-
 KV_CACHE_ITERATION_STATS_DELTA_FIELDS = tuple(
     field.name for field in fields(KVCacheIterationStatsDelta)
 )
@@ -152,11 +145,6 @@ class _MmRunMetadata(NamedTuple):
     run_item_indices: torch.Tensor
     # Shape [num_runs]; item-local token offset where each flat run begins.
     run_item_offsets: torch.Tensor
-
-
-class _BlockReusePrefixSnapshot(NamedTuple):
-    length: int
-    fingerprint: int
 
 
 def _hash_to_digest(hash_ints: Sequence[int]) -> bytes:
@@ -816,21 +804,13 @@ class KVCacheManagerV2(BaseResourceManager):
 
         self.enable_block_reuse = kv_cache_config.enable_block_reuse
         self.enable_partial_reuse = kv_cache_config.enable_partial_reuse
-        self._block_reuse_hit_log_count = 0
-        self._block_reuse_miss_log_count = 0
-        self._block_reuse_commit_log_count = 0
-        self._block_reuse_lookup_token_count = 0
-        self._block_reuse_reused_token_count = 0
-        self._block_reuse_commit_token_count = 0
-        self._block_reuse_dummy_lookup_count = 0
-        self._block_reuse_salted_lookup_count = 0
-        self._block_reuse_cache_salt_hashes: set[int] = set()
-        self._block_reuse_committed_prefix_count = 0
-        self._block_reuse_last_committed_prefix_by_scope = {}
-        self._block_reuse_last_committed_prefix = None
-        self._block_reuse_commit_fingerprint_state = {}
-        self._block_reuse_miss_with_matching_prefix_same_scope_count = 0
-        self._block_reuse_miss_with_matching_prefix_any_scope_count = 0
+        self._block_reuse_committed_request_count = 0
+        self._block_reuse_committed_token_count = 0
+        self._block_reuse_hit_request_count = 0
+        self._block_reuse_hit_token_count = 0
+        self._block_reuse_miss_request_count = 0
+        self._block_reuse_miss_token_count = 0
+        self._block_reuse_committed_request_ids: set[int] = set()
         self.disk_prefetch_num_reqs = kv_cache_config.disk_prefetch_num_reqs
 
         # With pipeline parallelism, multiple microbatches can be in-flight
@@ -1503,12 +1483,6 @@ class KVCacheManagerV2(BaseResourceManager):
         self._restore_page_index_bufs(req_id, kv_cache)
         return True
 
-    @staticmethod
-    def _get_cache_salt_hash(cache_salt: str | None) -> int | None:
-        if cache_salt is None:
-            return None
-        return int.from_bytes(hashlib.sha256(cache_salt.encode("utf-8")).digest()[:8], "little")
-
     def _get_block_reuse_commit_limit(self, request: LlmRequest) -> int:
         commit_limit = getattr(request, "py_block_reuse_commit_limit", None)
         if isinstance(commit_limit, int) and commit_limit > 0:
@@ -1531,132 +1505,21 @@ class KVCacheManagerV2(BaseResourceManager):
                 f"{request.py_request_id} to {history_length} tokens"
             )
 
-    @staticmethod
-    def _update_token_sequence_hasher(
-        hasher,
-        tokens: Sequence[TokenIdExt],
-        start: int = 0,
-        end: int | None = None,
-    ) -> None:
-        if end is None:
-            end = len(tokens)
-        for idx in range(start, end):
-            token = tokens[idx]
-            if type(token) is bytes:
-                hasher.update(b"b")
-                hasher.update(len(token).to_bytes(8, "little"))
-                hasher.update(token)
-            else:
-                hasher.update(b"i")
-                hasher.update(int(token).to_bytes(8, "little"))
-
-    @classmethod
-    def _get_token_sequence_fingerprint(
-        cls,
-        tokens: Sequence[TokenIdExt],
-        end: int | None = None,
-    ) -> int:
-        hasher = hashlib.sha256()
-        cls._update_token_sequence_hasher(hasher, tokens, end=end)
-        return int.from_bytes(hasher.digest()[:8], "little")
-
-    @staticmethod
-    def _get_block_reuse_scope(
-        request: LlmRequest,
-        salt_hash: int | None,
-    ) -> tuple[int | None, int | None]:
-        return getattr(request, "lora_task_id", None), salt_hash
-
-    @classmethod
-    def _does_token_sequence_start_with_snapshot(
-        cls,
-        tokens: Sequence[TokenIdExt],
-        snapshot: _BlockReusePrefixSnapshot | None,
-    ) -> bool:
-        if snapshot is None or snapshot.length > len(tokens):
-            return False
-        return cls._get_token_sequence_fingerprint(tokens, snapshot.length) == snapshot.fingerprint
-
-    def _record_block_reuse_committed_prefix(
+    def _record_block_reuse_commit(
         self,
         request: LlmRequest,
         commit_start: int,
         commit_end: int,
-    ) -> None:
-        if commit_end <= 0:
-            return
-        all_tokens = request.get_tokens(DEFAULT_BEAM_INDEX)
-        request_id = request.py_request_id
-        state = self._block_reuse_commit_fingerprint_state.get(request_id)
-        if state is not None and state[0] == commit_start:
-            _, hasher = state
-            tokens = self._augment_tokens_for_block_reuse(
-                all_tokens, request, start=commit_start, end=commit_end
-            )
-            self._update_token_sequence_hasher(hasher, tokens)
-        else:
-            tokens = self._augment_tokens_for_block_reuse(all_tokens, request, end=commit_end)
-            hasher = hashlib.sha256()
-            self._update_token_sequence_hasher(hasher, tokens)
-        self._block_reuse_commit_fingerprint_state[request_id] = (commit_end, hasher)
-        fingerprint = int.from_bytes(hasher.copy().digest()[:8], "little")
-        salt_hash = self._get_cache_salt_hash(getattr(request, "cache_salt", None))
-        scope = self._get_block_reuse_scope(request, salt_hash)
-        snapshot = _BlockReusePrefixSnapshot(commit_end, fingerprint)
-        self._block_reuse_committed_prefix_count += 1
-        self._block_reuse_last_committed_prefix_by_scope[scope] = snapshot
-        self._block_reuse_last_committed_prefix = snapshot
-
-    def _record_block_reuse_miss_diagnostics(
-        self,
-        request: LlmRequest,
-        tokens: Sequence[TokenIdExt],
-        salt_hash: int | None,
-    ) -> str:
-        scope = self._get_block_reuse_scope(request, salt_hash)
-        same_scope_snapshot = self._block_reuse_last_committed_prefix_by_scope.get(scope)
-
-        has_matching_prefix_same_scope = self._does_token_sequence_start_with_snapshot(
-            tokens, same_scope_snapshot
-        )
-        has_matching_prefix_any_scope = self._does_token_sequence_start_with_snapshot(
-            tokens, self._block_reuse_last_committed_prefix
-        )
-
-        if has_matching_prefix_same_scope:
-            self._block_reuse_miss_with_matching_prefix_same_scope_count += 1
-        if has_matching_prefix_any_scope:
-            self._block_reuse_miss_with_matching_prefix_any_scope_count += 1
-
-        return (
-            f"matching_prefix_same_scope={has_matching_prefix_same_scope}, "
-            f"matching_prefix_any_scope={has_matching_prefix_any_scope}"
-        )
-
-    def _log_block_reuse_commit(
-        self,
-        request: LlmRequest,
-        commit_start: int,
-        commit_end: int,
-        *,
-        complete: bool,
     ) -> None:
         if commit_end <= commit_start:
             return
         if request.is_dummy:
             return
-        self._block_reuse_commit_log_count += 1
-        self._block_reuse_commit_token_count += commit_end - commit_start
-        self._record_block_reuse_committed_prefix(request, commit_start, commit_end)
-        if self._block_reuse_commit_log_count <= 8 or self._block_reuse_commit_log_count % 512 == 0:
-            logger.info(
-                "KVCacheManagerV2 block reuse commit: "
-                f"request_id={request.py_request_id}, "
-                f"prompt_tokens={request.prompt_len}, "
-                f"commit_range=[{commit_start}, {commit_end}), "
-                f"complete={complete}, "
-                f"commit_count={self._block_reuse_commit_log_count}"
-            )
+        request_id = request.py_request_id
+        if request_id not in self._block_reuse_committed_request_ids:
+            self._block_reuse_committed_request_ids.add(request_id)
+            self._block_reuse_committed_request_count += 1
+        self._block_reuse_committed_token_count += commit_end - commit_start
 
     def prepare_context(self, req: LlmRequest) -> bool:
         """Create _KVCache, handle block reuse, and resume. Does NOT resize.
@@ -1690,50 +1553,15 @@ class KVCacheManagerV2(BaseResourceManager):
                     return False
                 kv_cache.cuda_stream = self._stream.cuda_stream
                 if self.enable_block_reuse and tokens is not None:
-                    if req.is_dummy:
-                        self._block_reuse_dummy_lookup_count += 1
-                    else:
-                        cache_salt = getattr(req, "cache_salt", None)
-                        salt_hash = self._get_cache_salt_hash(cache_salt)
-                        if salt_hash is not None:
-                            self._block_reuse_salted_lookup_count += 1
-                            self._block_reuse_cache_salt_hashes.add(salt_hash)
-                        self._block_reuse_lookup_token_count += len(tokens)
-                        if kv_cache.num_committed_tokens > 0:
-                            self._block_reuse_hit_log_count += 1
-                            self._block_reuse_reused_token_count += kv_cache.num_committed_tokens
-                            if (
-                                self._block_reuse_hit_log_count <= 8
-                                or self._block_reuse_hit_log_count % 128 == 0
-                            ):
-                                logger.info(
-                                    "KVCacheManagerV2 block reuse hit: "
-                                    f"request_id={req.py_request_id}, "
-                                    f"prompt_tokens={len(all_tokens)}, "
-                                    f"lookup_tokens={len(tokens)}, "
-                                    f"reused_tokens={kv_cache.num_committed_tokens}, "
-                                    f"reused_blocks={kv_cache.num_blocks}, "
-                                    f"cache_salt_present={cache_salt is not None}, "
-                                    f"hit_count={self._block_reuse_hit_log_count}"
-                                )
+                    reused_tokens = min(kv_cache.num_committed_tokens, len(tokens))
+                    missed_tokens = len(tokens) - reused_tokens
+                    if not req.is_dummy:
+                        if reused_tokens > 0:
+                            self._block_reuse_hit_request_count += 1
+                            self._block_reuse_hit_token_count += reused_tokens
                         else:
-                            self._block_reuse_miss_log_count += 1
-                            miss_diag = self._record_block_reuse_miss_diagnostics(
-                                req, tokens, salt_hash
-                            )
-                            if (
-                                self._block_reuse_miss_log_count <= 8
-                                or self._block_reuse_miss_log_count % 512 == 0
-                            ):
-                                logger.info(
-                                    "KVCacheManagerV2 block reuse miss: "
-                                    f"request_id={req.py_request_id}, "
-                                    f"prompt_tokens={len(all_tokens)}, "
-                                    f"lookup_tokens={len(tokens)}, "
-                                    f"cache_salt_present={cache_salt is not None}, "
-                                    f"{miss_diag}, "
-                                    f"miss_count={self._block_reuse_miss_log_count}"
-                                )
+                            self._block_reuse_miss_request_count += 1
+                        self._block_reuse_miss_token_count += missed_tokens
 
             if not self.enable_block_reuse:
                 kv_cache.stop_committing()
@@ -2415,15 +2243,6 @@ class KVCacheManagerV2(BaseResourceManager):
         commit_limit = self._get_block_reuse_commit_limit(request)
         commit_end = min(request.context_current_position, commit_limit)
         save_snapshot = self._should_save_ssm_snapshot(request, commit_end)
-        if os.environ.get("TLLM_DEBUG_AGENTX_REUSE") == "1":
-            logger.info(
-                "AGENTX_DEBUG v2 try_commit_blocks_for_reuse: "
-                f"request_id={request.py_request_id}, prompt={request.prompt_len}, "
-                f"pos={request.context_current_position}, commit_limit={commit_limit}, "
-                f"num_committed={kv_cache.num_committed_tokens}, commit_end={commit_end}, "
-                f"save_snapshot={save_snapshot}, "
-                f"snap={getattr(request, 'expect_snapshot_points', None)}"
-            )
         if commit_end > kv_cache.num_committed_tokens:
             commit_start = kv_cache.num_committed_tokens
             tokens = self._augment_tokens_for_block_reuse(
@@ -2436,11 +2255,10 @@ class KVCacheManagerV2(BaseResourceManager):
                 tokens,
                 save_ssm_snapshot=save_snapshot,
             )
-            self._log_block_reuse_commit(
+            self._record_block_reuse_commit(
                 request,
                 commit_start,
                 commit_end,
-                complete=request.context_current_position >= commit_limit,
             )
         if request.context_current_position >= commit_limit:
             self._mark_context_position_as_history(request, kv_cache)
@@ -2451,32 +2269,14 @@ class KVCacheManagerV2(BaseResourceManager):
         if not self.enable_block_reuse:
             return
 
-        num_lookups = self._block_reuse_hit_log_count + self._block_reuse_miss_log_count
-        request_hit_rate = self._block_reuse_hit_log_count / num_lookups if num_lookups > 0 else 0.0
-        token_reuse_rate = (
-            self._block_reuse_reused_token_count / self._block_reuse_lookup_token_count
-            if self._block_reuse_lookup_token_count > 0
-            else 0.0
-        )
         logger.info(
             "KVCacheManagerV2 block reuse summary: "
-            f"lookups={num_lookups}, "
-            f"hits={self._block_reuse_hit_log_count}, "
-            f"misses={self._block_reuse_miss_log_count}, "
-            f"request_hit_rate={request_hit_rate:.6f}, "
-            f"lookup_tokens={self._block_reuse_lookup_token_count}, "
-            f"reused_tokens={self._block_reuse_reused_token_count}, "
-            f"token_reuse_rate={token_reuse_rate:.6f}, "
-            f"commits={self._block_reuse_commit_log_count}, "
-            f"committed_tokens={self._block_reuse_commit_token_count}, "
-            f"dummy_lookups={self._block_reuse_dummy_lookup_count}, "
-            f"salted_lookups={self._block_reuse_salted_lookup_count}, "
-            f"unique_cache_salts={len(self._block_reuse_cache_salt_hashes)}, "
-            f"committed_prefixes={self._block_reuse_committed_prefix_count}, "
-            f"misses_with_matching_prefix_same_scope="
-            f"{self._block_reuse_miss_with_matching_prefix_same_scope_count}, "
-            f"misses_with_matching_prefix_any_scope="
-            f"{self._block_reuse_miss_with_matching_prefix_any_scope_count}"
+            f"committed_tokens={self._block_reuse_committed_token_count}, "
+            f"committed_requests={self._block_reuse_committed_request_count}, "
+            f"hit_tokens={self._block_reuse_hit_token_count}, "
+            f"hit_requests={self._block_reuse_hit_request_count}, "
+            f"miss_tokens={self._block_reuse_miss_token_count}, "
+            f"miss_requests={self._block_reuse_miss_request_count}"
         )
 
     def release_index_slot(self, request_id: int) -> None:
@@ -2494,12 +2294,12 @@ class KVCacheManagerV2(BaseResourceManager):
         self._allocated_draft_lens.pop(request.py_request_id, None)
         kv_cache = self.kv_cache_map.pop(request.py_request_id, None)
         if kv_cache is None:
-            self._block_reuse_commit_fingerprint_state.pop(request.py_request_id, None)
+            self._block_reuse_committed_request_ids.discard(request.py_request_id)
             self.impl.clear_stats_excluded(request.py_request_id)
             return
         kv_cache.discard_pending_stats()
         self.try_commit_blocks_for_reuse(request, kv_cache)
-        self._block_reuse_commit_fingerprint_state.pop(request.py_request_id, None)
+        self._block_reuse_committed_request_ids.discard(request.py_request_id)
         kv_cache.close()
         self.impl.clear_stats_excluded(request.py_request_id)
         if request.py_request_id in self._early_freed_index_requests:
@@ -2725,22 +2525,10 @@ class KVCacheManagerV2(BaseResourceManager):
         layer. In non-overlap scheduler, you should call it together with
         update_resources().
         """
-        debug_agentx_reuse = os.environ.get("TLLM_DEBUG_AGENTX_REUSE") == "1"
         for req in scheduled_batch.context_requests:
             if req.py_request_id not in self.kv_cache_map:
                 continue
             kv_cache = self.kv_cache_map[req.py_request_id]
-            if debug_agentx_reuse:
-                logger.info(
-                    "AGENTX_DEBUG v2 update_context_resources request begin: "
-                    f"request_id={req.py_request_id}, prompt={req.prompt_len}, "
-                    f"pos={_safe_debug_attr(req, 'context_current_position')}, "
-                    f"chunk={_safe_debug_attr(req, 'context_chunk_size')}, "
-                    f"remaining={_safe_debug_attr(req, 'context_remaining_length')}, "
-                    f"num_committed={kv_cache.num_committed_tokens}, "
-                    f"limit={self._get_block_reuse_commit_limit(req)}, "
-                    f"snap={getattr(req, 'expect_snapshot_points', None)}"
-                )
             # In the overlap scheduler, iteration N+1's eviction may
             # suspend a ctx request's KV cache while iteration N's
             # update still needs to process it.  Skip the resize — the
@@ -2752,13 +2540,6 @@ class KVCacheManagerV2(BaseResourceManager):
                 commit_limit = self._get_block_reuse_commit_limit(req)
                 commit_end = min(req.context_current_position, commit_limit)
                 save_snapshot = self._should_save_ssm_snapshot(req, commit_end)
-                if debug_agentx_reuse:
-                    logger.info(
-                        "AGENTX_DEBUG v2 update_context_resources commit check: "
-                        f"request_id={req.py_request_id}, commit_end={commit_end}, "
-                        f"num_committed={kv_cache.num_committed_tokens}, "
-                        f"save_snapshot={save_snapshot}"
-                    )
                 if commit_end > kv_cache.num_committed_tokens:
                     commit_start = kv_cache.num_committed_tokens
                     tokens = self._augment_tokens_for_block_reuse(
@@ -2771,11 +2552,10 @@ class KVCacheManagerV2(BaseResourceManager):
                         tokens,
                         save_ssm_snapshot=save_snapshot,
                     )
-                    self._log_block_reuse_commit(
+                    self._record_block_reuse_commit(
                         req,
                         commit_start,
                         commit_end,
-                        complete=req.context_current_position >= commit_limit,
                     )
                 if req.context_current_position >= commit_limit:
                     self._mark_context_position_as_history(req, kv_cache)
@@ -2789,12 +2569,6 @@ class KVCacheManagerV2(BaseResourceManager):
                         f"{req.py_request_id} to {req.context_current_position} tokens "
                         "at context update"
                     )
-            if debug_agentx_reuse:
-                logger.info(
-                    "AGENTX_DEBUG v2 update_context_resources request end: "
-                    f"request_id={req.py_request_id}, num_committed={kv_cache.num_committed_tokens}, "
-                    f"history={kv_cache.history_length}, capacity={kv_cache.capacity}"
-                )
 
     def update_resources(
         self,

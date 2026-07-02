@@ -1474,7 +1474,6 @@ class TestSSMSupport(unittest.TestCase):
         num_ssm_layers: int = 2,
         window_size: SlidingWindowSize = None,
         ssm_reuse_interval: int = 512,
-        mamba_save_last_snapshot: bool = False,
     ) -> KVCacheManagerConfig:
         layers = []
         lid = 0
@@ -1506,7 +1505,6 @@ class TestSSMSupport(unittest.TestCase):
             cache_tiers=[GpuCacheTierConfig(quota=gpu_quota)],
             layers=layers,
             ssm_reuse_interval=ssm_reuse_interval,
-            mamba_save_last_snapshot=mamba_save_last_snapshot,
             enable_partial_reuse=False,
         )
 
@@ -1591,7 +1589,6 @@ class TestSSMSupport(unittest.TestCase):
         gpu_quota: int = 32 << 20,
         num_attn_layers: int = 2,
         num_ssm_layers: int = 2,
-        mamba_save_last_snapshot: bool = False,
     ) -> KVCacheManagerConfig:
         return self._make_ssm_config(
             tokens_per_block=tokens_per_block,
@@ -1599,7 +1596,6 @@ class TestSSMSupport(unittest.TestCase):
             num_attn_layers=num_attn_layers,
             num_ssm_layers=num_ssm_layers,
             ssm_reuse_interval=ssm_reuse_interval,
-            mamba_save_last_snapshot=mamba_save_last_snapshot,
         )
 
     def test_ssm_reuse_interval_boundary(self) -> None:
@@ -1700,7 +1696,6 @@ class TestSSMSupport(unittest.TestCase):
         cfg = self._make_ssm_reuse_config(
             tokens_per_block=32,
             ssm_reuse_interval=512,
-            mamba_save_last_snapshot=True,
         )
         self.manager = KVCacheManager(cfg)
         engine = FakeEngine(cfg)
@@ -1746,7 +1741,6 @@ class TestSSMSupport(unittest.TestCase):
         cfg = self._make_ssm_reuse_config(
             tokens_per_block=tokens_per_block,
             ssm_reuse_interval=0,
-            mamba_save_last_snapshot=True,
         )
         self.manager = KVCacheManager(cfg)
         stream_holder = CachedCudaStream()
@@ -1777,7 +1771,6 @@ class TestSSMSupport(unittest.TestCase):
         cfg = self._make_ssm_reuse_config(
             tokens_per_block=tokens_per_block,
             ssm_reuse_interval=0,
-            mamba_save_last_snapshot=True,
         )
         self.manager = KVCacheManager(cfg)
         engine = FakeEngine(cfg)
@@ -1831,7 +1824,6 @@ class TestSSMSupport(unittest.TestCase):
         cfg = self._make_ssm_reuse_config(
             tokens_per_block=32,
             ssm_reuse_interval=128,
-            mamba_save_last_snapshot=True,
         )
         self.manager = KVCacheManager(cfg)
         engine = FakeEngine(cfg)
@@ -1861,7 +1853,6 @@ class TestSSMSupport(unittest.TestCase):
         cfg = self._make_ssm_reuse_config(
             tokens_per_block=32,
             ssm_reuse_interval=0,
-            mamba_save_last_snapshot=True,
         )
         self.manager = KVCacheManager(cfg)
         engine = FakeEngine(cfg)
@@ -1908,7 +1899,6 @@ class TestSSMSupport(unittest.TestCase):
         cfg = self._make_ssm_reuse_config(
             tokens_per_block=tokens_per_block,
             ssm_reuse_interval=0,
-            mamba_save_last_snapshot=True,
         )
         self.manager = KVCacheManager(cfg)
         engine = FakeEngine(cfg)
@@ -1959,7 +1949,6 @@ class TestSSMSupport(unittest.TestCase):
         cfg = self._make_ssm_reuse_config(
             tokens_per_block=tokens_per_block,
             ssm_reuse_interval=0,
-            mamba_save_last_snapshot=True,
         )
         self.manager = KVCacheManager(cfg)
         engine = FakeEngine(cfg)
@@ -2039,14 +2028,8 @@ class TestSSMSupport(unittest.TestCase):
         # Not divisible by tokens_per_block
         with self.assertRaises(AssertionError):
             self._make_ssm_config(tokens_per_block=32, ssm_reuse_interval=50)
-        # Zero interval requires save-last snapshot.
-        with self.assertRaises(AssertionError):
-            self._make_ssm_config(tokens_per_block=32, ssm_reuse_interval=0)
-        self._make_ssm_config(
-            tokens_per_block=32,
-            ssm_reuse_interval=0,
-            mamba_save_last_snapshot=True,
-        )
+        # Zero interval disables regular snapshots and is valid.
+        self._make_ssm_config(tokens_per_block=32, ssm_reuse_interval=0)
         with self.assertRaises(AssertionError):
             self._make_ssm_config(tokens_per_block=32, ssm_reuse_interval=-32)
 
