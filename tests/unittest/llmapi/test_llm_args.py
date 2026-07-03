@@ -408,6 +408,8 @@ class TestModelDefaults:
 
 def test_KvCacheConfig_declaration():
     assert KvCacheConfig().kv_cache_event_hash_algo == "auto"
+    assert KvCacheConfig().block_reuse_policy == "all_reusable"
+    assert KvCacheConfig().enable_swa_scratch_reuse is False
 
     config = KvCacheConfig(enable_block_reuse=True,
                            max_tokens=1024,
@@ -420,10 +422,14 @@ def test_KvCacheConfig_declaration():
                            secondary_offload_min_priority=1,
                            event_buffer_max_size=0,
                            kv_cache_event_hash_algo="v2_sha256_64",
+                           enable_swa_scratch_reuse=True,
                            enable_partial_reuse=True,
                            copy_on_partial_reuse=True,
                            mamba_state_cache_interval=0,
                            mamba_save_last_snapshot=True,
+                           pool_ratio=[0.25, 0.75],
+                           avg_seq_len=2048,
+                           block_reuse_policy="per_request",
                            attention_dp_events_gather_period_ms=10)
 
     pybind_config = config._to_pybind()
@@ -434,10 +440,19 @@ def test_KvCacheConfig_declaration():
     assert pybind_config.host_cache_size == 1024
     assert config.disk_cache_size == 2048
     assert config.disk_cache_path == "/tmp"
+    assert config.enable_swa_scratch_reuse is True
+    assert KvCacheConfig().enable_swa_scratch_reuse is False
     assert pybind_config.cross_kv_cache_fraction == 0.5
     assert pybind_config.secondary_offload_min_priority == 1
     assert pybind_config.event_buffer_max_size == 0
     assert config.kv_cache_event_hash_algo == "v2_sha256_64"
+    assert config.pool_ratio == [0.25, 0.75]
+    assert config.avg_seq_len == 2048
+    assert config.block_reuse_policy == "per_request"
+    assert not hasattr(pybind_config, "pool_ratio")
+    assert not hasattr(pybind_config, "avg_seq_len")
+    assert not hasattr(pybind_config, "block_reuse_policy")
+    assert not hasattr(pybind_config, "enable_swa_scratch_reuse")
     assert KvCacheConfig(
         kv_cache_event_hash_algo="auto").kv_cache_event_hash_algo == "auto"
     assert KvCacheConfig(kv_cache_event_hash_algo="v1_block_key"
@@ -447,6 +462,8 @@ def test_KvCacheConfig_declaration():
     assert config.mamba_state_cache_interval == 0
     assert config.mamba_save_last_snapshot == True
     assert pybind_config.attention_dp_events_gather_period_ms == 10
+    with pytest.raises(ValidationError):
+        KvCacheConfig(block_reuse_policy="invalid")
 
 
 def test_KvCacheConfig_disk_cache_validation(tmp_path):
@@ -537,6 +554,25 @@ class TestMultimodalConfig:
         )
         encoder_graph = args.multimodal_config.encoder_cuda_graph
         assert encoder_graph["vision"].buckets == [(1035, 1), (2069, 2)]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {
+        "pool_ratio": []
+    },
+    {
+        "pool_ratio": [0.0, 1.0]
+    },
+    {
+        "pool_ratio": [0.25, 0.25]
+    },
+    {
+        "avg_seq_len": 0
+    },
+])
+def test_KvCacheConfig_pool_ratio_avg_seq_len_validation(kwargs):
+    with pytest.raises(ValidationError):
+        KvCacheConfig(**kwargs)
 
 
 def test_CapacitySchedulerPolicy():
