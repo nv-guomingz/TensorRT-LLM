@@ -13,13 +13,13 @@ import torch
 from tensorrt_llm._torch.pyexecutor._util import get_kv_cache_manager_cls
 from tensorrt_llm._torch.pyexecutor.cuda_graph_runner import CUDA_GRAPH_DUMMY_REQUEST_ID
 from tensorrt_llm._torch.pyexecutor.kv_cache_manager_v2 import KVCacheManagerV2, Role
-from tensorrt_llm._torch.pyexecutor.llm_request import ATTENTION_DP_DUMMY_REQUEST_ID
+from tensorrt_llm._torch.pyexecutor.llm_request import ATTENTION_DP_DUMMY_REQUEST_ID, LlmRequest
 from tensorrt_llm._torch.pyexecutor.mamba_cache_manager import (
     MIN_REPLAY_HISTORY_SIZE,
     CppMambaCacheManager,
     CppMambaHybridCacheManager,
-    KVCacheManagerV2MambaHybridCacheManager,
     PythonMambaCacheManager,
+    V2MambaHybridCacheManager,
     _calc_context_stop_positions_for_request,
     _get_mamba_hybrid_pool_size,
     calc_context_stop_positions,
@@ -51,11 +51,32 @@ def test_hybrid_cache_manager_factory_defaults_to_v2(monkeypatch):
 
     assert (
         get_kv_cache_manager_cls(model_config, KvCacheConfig(enable_block_reuse=False))
-        is KVCacheManagerV2MambaHybridCacheManager
+        is V2MambaHybridCacheManager
     )
     assert (
         get_kv_cache_manager_cls(model_config, KvCacheConfig(enable_block_reuse=True))
-        is KVCacheManagerV2MambaHybridCacheManager
+        is V2MambaHybridCacheManager
+    )
+
+
+def test_hybrid_cache_manager_factory_honors_cpp_preference_with_block_reuse(monkeypatch):
+    monkeypatch.delenv("TRTLLM_USE_CPP_MAMBA", raising=False)
+    monkeypatch.delenv("TRTLLM_USE_PY_MAMBA", raising=False)
+    monkeypatch.setenv("TLLM_MAMBA_MANAGER_PREFERENCE", "CPP")
+    config = SimpleNamespace(
+        architectures=["Qwen3_5MoeForCausalLM"],
+        num_hidden_layers=2,
+        layer_types=["linear_attention", "full_attention"],
+    )
+    model_config = SimpleNamespace(
+        pretrained_config=config,
+        sparse_attention_config=None,
+        get_num_mamba_layers=lambda: 1,
+    )
+
+    assert (
+        get_kv_cache_manager_cls(model_config, KvCacheConfig(enable_block_reuse=True))
+        is CppMambaHybridCacheManager
     )
 
 
@@ -395,7 +416,7 @@ def test_calc_context_stop_positions_returns_snapshot_points():
 
 
 def test_v2_hybrid_prepare_expect_snapshot_points():
-    mgr = object.__new__(KVCacheManagerV2MambaHybridCacheManager)
+    mgr = object.__new__(V2MambaHybridCacheManager)
     mgr.kv_cache_config = KvCacheConfig(
         enable_block_reuse=True,
         mamba_state_cache_interval=64,
@@ -411,7 +432,7 @@ def test_v2_hybrid_prepare_expect_snapshot_points():
 
 
 def test_v2_hybrid_prepare_expect_snapshot_points_save_last_only():
-    mgr = object.__new__(KVCacheManagerV2MambaHybridCacheManager)
+    mgr = object.__new__(V2MambaHybridCacheManager)
     mgr.kv_cache_config = KvCacheConfig(
         enable_block_reuse=True,
         mamba_state_cache_interval=0,
@@ -427,7 +448,7 @@ def test_v2_hybrid_prepare_expect_snapshot_points_save_last_only():
 
 
 def test_v2_hybrid_prepare_expect_snapshot_points_uses_stable_boundary():
-    mgr = object.__new__(KVCacheManagerV2MambaHybridCacheManager)
+    mgr = object.__new__(V2MambaHybridCacheManager)
     mgr.kv_cache_config = KvCacheConfig(
         enable_block_reuse=True,
         mamba_state_cache_interval=0,
@@ -456,26 +477,16 @@ def test_v2_hybrid_stable_boundary_becomes_snapshot_point():
     ) == [137]
 
 
-def test_v2_block_reuse_commit_limit_uses_stable_boundary_when_last_snapshot_enabled():
-    mgr = object.__new__(KVCacheManagerV2)
-    mgr.kv_cache_config = KvCacheConfig(mamba_save_last_snapshot=True)
-    request = SimpleNamespace(
-        prompt_len=150,
-        py_reusable_prompt_len=137,
-    )
+def test_request_block_reuse_commit_limit_uses_snapshot_points():
+    request = SimpleNamespace(prompt_len=150, expect_snapshot_points=[137])
 
-    assert mgr._get_block_reuse_commit_limit(request) == 137
+    assert LlmRequest.block_reuse_commit_limit(request) == 137
 
 
-def test_v2_block_reuse_commit_limit_ignores_stable_boundary_when_last_snapshot_disabled():
-    mgr = object.__new__(KVCacheManagerV2)
-    mgr.kv_cache_config = KvCacheConfig(mamba_save_last_snapshot=False)
-    request = SimpleNamespace(
-        prompt_len=150,
-        py_reusable_prompt_len=137,
-    )
+def test_request_block_reuse_commit_limit_defaults_to_prompt_len():
+    request = SimpleNamespace(prompt_len=150, expect_snapshot_points=[])
 
-    assert mgr._get_block_reuse_commit_limit(request) == 150
+    assert LlmRequest.block_reuse_commit_limit(request) == 150
 
 
 def test_v2_block_reuse_commit_saves_ssm_snapshot_at_snapshot_point():
@@ -497,6 +508,8 @@ def test_v2_block_reuse_commit_saves_ssm_snapshot_at_snapshot_point():
         is_dummy=False,
         py_request_id=0,
         get_tokens=lambda beam_idx: token_ids,
+        block_reuse_commit_limit=lambda: 137,
+        should_save_ssm_snapshot=lambda commit_end: commit_end == 137,
     )
     kv_cache = SimpleNamespace(
         num_committed_tokens=0,
@@ -513,7 +526,7 @@ def test_v2_block_reuse_commit_saves_ssm_snapshot_at_snapshot_point():
 
 
 def test_v2_hybrid_prepare_expect_snapshot_points_clears_when_reuse_disabled():
-    mgr = object.__new__(KVCacheManagerV2MambaHybridCacheManager)
+    mgr = object.__new__(V2MambaHybridCacheManager)
     mgr.kv_cache_config = KvCacheConfig(enable_block_reuse=False)
     mgr.tokens_per_block = 32
     mgr._mamba_state_cache_interval = 64
@@ -521,7 +534,7 @@ def test_v2_hybrid_prepare_expect_snapshot_points_clears_when_reuse_disabled():
 
     mgr.prepare_expect_snapshot_points([request])
 
-    assert request.expect_snapshot_points is None
+    assert request.expect_snapshot_points == []
 
 
 @skip_no_cuda
@@ -623,13 +636,13 @@ def _build_v2_hybrid_with_mamba_layer(
     spec_config=None,
     use_replay_state_update=False,
 ):
-    """Construct a real KVCacheManagerV2MambaHybridCacheManager."""
+    """Construct a real V2MambaHybridCacheManager."""
     num_attention_layers = 1
     mamba_mask = [True] * num_mamba_layers + [False] * num_attention_layers
     attn_mask = [False] * num_mamba_layers + [True] * num_attention_layers
     mapping = Mapping(world_size=1, rank=0, tp_size=1, pp_size=1)
     kv_cache_config = KvCacheConfig(max_tokens=512, enable_block_reuse=False)
-    return KVCacheManagerV2MambaHybridCacheManager(
+    return V2MambaHybridCacheManager(
         mamba_d_state=8,
         mamba_d_conv=4,
         mamba_num_heads=4,

@@ -1483,19 +1483,8 @@ class KVCacheManagerV2(BaseResourceManager):
         self._restore_page_index_bufs(req_id, kv_cache)
         return True
 
-    def _get_block_reuse_commit_limit(self, request: LlmRequest) -> int:
-        if getattr(self.kv_cache_config, "mamba_save_last_snapshot", False):
-            reusable_prompt_len = getattr(request, "py_reusable_prompt_len", None)
-            if isinstance(reusable_prompt_len, int) and reusable_prompt_len > 0:
-                return min(reusable_prompt_len, request.prompt_len)
-        return request.prompt_len
-
-    @staticmethod
-    def _should_save_ssm_snapshot(request: LlmRequest, commit_end: int) -> bool:
-        points = getattr(request, "expect_snapshot_points", None)
-        return bool(isinstance(points, (list, tuple)) and commit_end in points)
-
     def _mark_context_position_as_history(self, request: LlmRequest, kv_cache) -> None:
+        """Advance history without making later tokens reusable."""
         history_length = request.context_current_position
         if history_length <= kv_cache.history_length:
             return
@@ -1546,7 +1535,7 @@ class KVCacheManagerV2(BaseResourceManager):
                     req.py_request_id,
                     req.lora_task_id,
                     tokens,
-                    cache_salt=getattr(req, "cache_salt", None),
+                    cache_salt=req.cache_salt,
                     is_dummy=req.is_dummy,
                     expected_prompt_length=req.prompt_len - 1,
                 )
@@ -1689,7 +1678,7 @@ class KVCacheManagerV2(BaseResourceManager):
                         req.py_request_id,
                         req.lora_task_id,
                         None,
-                        cache_salt=getattr(req, "cache_salt", None),
+                        cache_salt=req.cache_salt,
                         is_dummy=req.is_dummy,
                     )
                     kv_cache.stop_committing()
@@ -2241,9 +2230,9 @@ class KVCacheManagerV2(BaseResourceManager):
     def try_commit_blocks_for_reuse(self, request: LlmRequest, kv_cache) -> None:
         if not self.enable_block_reuse or self.is_draft or request.is_dummy_request:
             return
-        commit_limit = self._get_block_reuse_commit_limit(request)
+        commit_limit = request.block_reuse_commit_limit()
         commit_end = min(request.context_current_position, commit_limit)
-        save_snapshot = self._should_save_ssm_snapshot(request, commit_end)
+        save_snapshot = request.should_save_ssm_snapshot(commit_end)
         if commit_end > kv_cache.num_committed_tokens:
             commit_start = kv_cache.num_committed_tokens
             tokens = self._augment_tokens_for_block_reuse(
@@ -2538,9 +2527,9 @@ class KVCacheManagerV2(BaseResourceManager):
             if not kv_cache.is_active:
                 continue
             if self.enable_block_reuse and not self.is_draft and not req.is_dummy_request:
-                commit_limit = self._get_block_reuse_commit_limit(req)
+                commit_limit = req.block_reuse_commit_limit()
                 commit_end = min(req.context_current_position, commit_limit)
-                save_snapshot = self._should_save_ssm_snapshot(req, commit_end)
+                save_snapshot = req.should_save_ssm_snapshot(commit_end)
                 if commit_end > kv_cache.num_committed_tokens:
                     commit_start = kv_cache.num_committed_tokens
                     tokens = self._augment_tokens_for_block_reuse(

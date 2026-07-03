@@ -16,7 +16,7 @@
 import enum
 from typing import Optional
 
-from tensorrt_llm.llmapi.llm_args import CapacitySchedulerPolicy
+from tensorrt_llm.llmapi.llm_args import CapacitySchedulerPolicy, ContextChunkingPolicy
 from tensorrt_llm.logger import logger
 
 from ..llm_request import LlmRequest, LlmRequestState, get_draft_token_length
@@ -174,7 +174,7 @@ class KVCacheV2Scheduler(RequestScheduler):
 
         # Chunking config.
         self.chunking_enabled = False
-        self.chunking_policy = None
+        self.chunking_policy: Optional[ContextChunkingPolicy] = None
         self.chunk_unit_size = 0
         self.max_context_length = max_num_tokens
         self.tokens_per_block = kv_cache_manager.tokens_per_block
@@ -558,7 +558,8 @@ class KVCacheV2Scheduler(RequestScheduler):
         context_remaining = req.context_remaining_length
         force_chunk = self._is_force_chunking_policy()
         if force_chunk:
-            chunk_size = self._force_chunk_size(req, context_remaining)
+            assert isinstance(req.expect_snapshot_points, list)
+            chunk_size = req.get_forced_context_chunk_size(context_remaining)
         else:
             # Min budget check — FCFS chunking needs at least one chunk unit.
             if remaining_budget is not None and remaining_budget < self.chunk_unit_size:
@@ -578,7 +579,7 @@ class KVCacheV2Scheduler(RequestScheduler):
         # Round down to chunk_unit_size boundary when we are not stopping at
         # an exact forced point or the prompt end.
         if chunk_size < context_remaining and not (
-            force_chunk and self._is_forced_chunk_boundary(req, chunk_size)
+            force_chunk and req.is_forced_context_chunk_boundary(chunk_size)
         ):
             chunk_size = (chunk_size // self.chunk_unit_size) * self.chunk_unit_size
 
@@ -623,43 +624,7 @@ class KVCacheV2Scheduler(RequestScheduler):
         return ScheduleAction.SCHEDULED, chunk_tokens, chunking_flag
 
     def _is_force_chunking_policy(self) -> bool:
-        policy = self.chunking_policy
-        if policy is None:
-            return False
-        return (
-            getattr(policy, "name", None) == "FORCE_CHUNK"
-            or getattr(policy, "value", None) == "FORCE_CHUNK"
-            or str(policy).endswith("FORCE_CHUNK")
-        )
-
-    @staticmethod
-    def _get_force_chunk_points(req: LlmRequest) -> list[int] | tuple[int, ...] | None:
-        return getattr(req, "expect_snapshot_points", None)
-
-    def _force_chunk_size(self, req: LlmRequest, context_remaining: int) -> int:
-        points = self._get_force_chunk_points(req)
-        if not isinstance(points, (list, tuple)):
-            raise RuntimeError(
-                "FORCE_CHUNK requires request.expect_snapshot_points to be "
-                f"set before scheduling request {req.py_request_id}"
-            )
-        if not points:
-            return context_remaining
-
-        current = req.context_current_position
-        next_point = min((point for point in points if point > current), default=None)
-        if next_point is None:
-            return context_remaining
-
-        next_position = min(next_point, req.prompt_len)
-        return max(0, next_position - current)
-
-    def _is_forced_chunk_boundary(self, req: LlmRequest, chunk_size: int) -> bool:
-        next_position = req.context_current_position + chunk_size
-        if next_position >= req.prompt_len:
-            return True
-        points = self._get_force_chunk_points(req)
-        return bool(isinstance(points, (list, tuple)) and next_position in points)
+        return self.chunking_policy == ContextChunkingPolicy.FORCE_CHUNK
 
     def _align_chunk_to_mm_block(
         self,

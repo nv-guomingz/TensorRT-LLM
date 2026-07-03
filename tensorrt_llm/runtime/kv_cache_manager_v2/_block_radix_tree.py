@@ -356,6 +356,8 @@ class Block:
                 if b.tokens[: len(tokens)] == tokens:
                     raise UselessBlockError(b)
         # If there are sibling blocks fully covered by this block, remove them.
+        # Some partial blocks carry non-token state such as SSM snapshots; keep
+        # those life cycles even when a longer sibling covers the token prefix.
         protected_life_cycles = tuple(protected_life_cycles)
         to_remove = []
         for k, b in prev.next.items():

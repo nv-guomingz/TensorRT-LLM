@@ -1708,8 +1708,8 @@ class TestSSMSupport(unittest.TestCase):
         kv1.capacity = len(prompt)
         kv1.history_length = len(prompt)
         engine.execute([Step(kv1, prompt, [])], stream)
-        kv1.commit(prompt)
-        kv1.stop_committing(save_last_ssm_snapshot=True)
+        kv1.commit(prompt, save_ssm_snapshot=True)
+        kv1.stop_committing()
         kv1.close()
 
         kv2 = self.manager.create_kv_cache(input_tokens=prompt)
@@ -1788,8 +1788,8 @@ class TestSSMSupport(unittest.TestCase):
         kv1.capacity = len(longer_prompt)
         kv1.history_length = len(longer_prompt)
         engine.execute([Step(kv1, longer_prompt, [])], stream)
-        kv1.commit(longer_prompt)
-        kv1.stop_committing(save_last_ssm_snapshot=True)
+        kv1.commit(longer_prompt, save_ssm_snapshot=True)
+        kv1.stop_committing()
         kv1.close()
 
         kv2 = self.manager.create_kv_cache()
@@ -1797,8 +1797,8 @@ class TestSSMSupport(unittest.TestCase):
         kv2.capacity = len(shorter_prompt)
         kv2.history_length = len(shorter_prompt)
         engine.execute([Step(kv2, shorter_prompt, [])], stream)
-        kv2.commit(shorter_prompt)
-        kv2.stop_committing(save_last_ssm_snapshot=True)
+        kv2.commit(shorter_prompt, save_ssm_snapshot=True)
+        kv2.stop_committing()
         kv2.close()
 
         kv3 = self.manager.create_kv_cache(input_tokens=shorter_prompt)
@@ -1836,8 +1836,8 @@ class TestSSMSupport(unittest.TestCase):
         kv1.capacity = len(prompt)
         kv1.history_length = len(prompt)
         engine.execute([Step(kv1, prompt, [])], stream)
-        kv1.commit(prompt)
-        kv1.stop_committing(save_last_ssm_snapshot=True)
+        kv1.commit(prompt, save_ssm_snapshot=True)
+        kv1.stop_committing()
         kv1.close()
 
         kv2 = self.manager.create_kv_cache(input_tokens=prompt)
@@ -1865,8 +1865,8 @@ class TestSSMSupport(unittest.TestCase):
         kv1.capacity = len(prompt)
         kv1.history_length = len(prompt)
         engine.execute([Step(kv1, prompt, [])], stream)
-        kv1.commit(prompt)
-        kv1.stop_committing(save_last_ssm_snapshot=True)
+        kv1.commit(prompt, save_ssm_snapshot=True)
+        kv1.stop_committing()
         kv1.close()
 
         kv2 = self.manager.create_kv_cache(input_tokens=prompt)
@@ -1916,8 +1916,8 @@ class TestSSMSupport(unittest.TestCase):
                 kv_cache.capacity = len(base)
                 kv_cache.history_length = len(base)
                 engine.execute([Step(kv_cache, base, [])], stream)
-                kv_cache.commit(base)
-                kv_cache.stop_committing(save_last_ssm_snapshot=True)
+                kv_cache.commit(base, save_ssm_snapshot=True)
+                kv_cache.stop_committing()
                 kv_cache.close()
 
         def run_order(reuse_scope: ReuseScope, order: list[int]) -> None:
@@ -1967,8 +1967,8 @@ class TestSSMSupport(unittest.TestCase):
             kv_cache.capacity = len(base)
             kv_cache.history_length = len(base)
             engine.execute([Step(kv_cache, base, [])], stream)
-            kv_cache.commit(base)
-            kv_cache.stop_committing(save_last_ssm_snapshot=True)
+            kv_cache.commit(base, save_ssm_snapshot=True)
+            kv_cache.stop_committing()
             kv_cache.close()
 
         base, suffix = targets[-1]

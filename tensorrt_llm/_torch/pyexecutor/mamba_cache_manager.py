@@ -2430,8 +2430,7 @@ class CppMambaHybridCacheManager(KVCacheManager, MambaHybridCacheManager):
         return getattr(self, 'mamba_ssm_rand_seed', None)
 
 
-class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
-                                              MambaHybridCacheManager):
+class V2MambaHybridCacheManager(KVCacheManagerV2, MambaHybridCacheManager):
     """Hybrid Mamba cache manager backed by KVCacheManagerV2.
 
     Attention KV pages and Mamba recurrent-state pages are both owned by the
@@ -3109,7 +3108,7 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
         if self._debug_prepare_resources_call_count % 100 == 0:
             logger.info(
                 "TEMP DEBUG REMOVE BEFORE MERGE: "
-                "KVCacheManagerV2MambaHybridCacheManager prepare_resources "
+                "V2MambaHybridCacheManager prepare_resources "
                 f"call_count={self._debug_prepare_resources_call_count}")
             self._log_block_reuse_summary()
         if self.local_num_mamba_layers == 0:
@@ -3295,14 +3294,14 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
         """Set absolute context positions where FORCE_CHUNK should save snapshots."""
         if not self.kv_cache_config.enable_block_reuse:
             for request in requests:
-                request.expect_snapshot_points = None
+                request.expect_snapshot_points = []
             return
 
         interval = self._mamba_state_cache_interval
         save_last_snapshot = self.kv_cache_config.mamba_save_last_snapshot
         if (interval is None or interval <= 0) and not save_last_snapshot:
             for request in requests:
-                request.expect_snapshot_points = None
+                request.expect_snapshot_points = []
             return
 
         for request in requests:
@@ -3319,12 +3318,7 @@ class KVCacheManagerV2MambaHybridCacheManager(KVCacheManagerV2,
                 "Expected context_current_position to be 0 when block reuse "
                 f"is disabled, but got {current}")
             return prompt_len - current
-        stop_positions = getattr(request, "expect_snapshot_points", None)
-        if stop_positions is None:
-            step = self._mamba_state_cache_interval
-            stop_positions = _calc_context_stop_positions_for_request(
-                request, self.tokens_per_block, step,
-                self.kv_cache_config.mamba_save_last_snapshot)
+        stop_positions = request.expect_snapshot_points
         for pos in stop_positions:
             if pos > current:
                 return pos - current

@@ -935,7 +935,7 @@ class _KVCache:
     # Users promise to not commit any more tokens. For cases where we shouldn't reuse generated tokens
     # (eg. CoT), this helps us drop (instead of evict) out-of-window blocks for SWA layers.
     # If there is a uncommitted block containing committed tokens, we will commit the block immediately.
-    def stop_committing(self, save_last_ssm_snapshot: bool = False) -> None:
+    def stop_committing(self) -> None:
         assert self.status != self.Status.CLOSED
         if self._commit_state == self.CommitState.USER_STOP:
             return
@@ -947,10 +947,8 @@ class _KVCache:
         if self.num_committed_tokens % self.tokens_per_block != 0:
             ordinal = _KVCache._to_block_ordinal(self.tokens_per_block, self.num_committed_tokens)
             with self._record_event():
-                self._commit_block(ordinal, True, save_last_ssm_snapshot)
+                self._commit_block(ordinal, True)
         else:
-            if save_last_ssm_snapshot:
-                self._snapshot_last_committed_ssm_block()
             self._commit_state = self.CommitState.USER_STOP
             self._on_stop_committing()
         # TODO: check if the last committed pages are usable, in case some prior pages are already
@@ -1316,7 +1314,7 @@ class _KVCache:
             return  # No pages available in any level, silently skip snapshot
 
     def _should_snapshot_ssm_block(
-        self, ordinal: BlockOrdinal, is_last: bool, save_last_ssm_snapshot: bool
+        self, ordinal: BlockOrdinal, is_last: bool, force_ssm_snapshot: bool
     ) -> bool:
         del is_last
         num_committed = self.num_committed_tokens
@@ -1326,7 +1324,7 @@ class _KVCache:
         if block_end != num_committed:
             return False
         interval = self.manager.ssm_reuse_interval
-        return (interval > 0 and num_committed % interval == 0) or save_last_ssm_snapshot
+        return (interval > 0 and num_committed % interval == 0) or force_ssm_snapshot
 
     def _snapshot_last_committed_ssm_block(self) -> None:
         ssm_lc_id = self.manager._life_cycles.ssm_life_cycle_id
@@ -1343,7 +1341,7 @@ class _KVCache:
         self,
         ordinal: BlockOrdinal,
         is_last: bool,
-        save_last_ssm_snapshot: bool = False,
+        force_ssm_snapshot: bool = False,
         stop_after_commit: bool = True,
     ) -> None:
         "Commit the block for reuse. Block must be full of tokens except for the last block."
@@ -1364,7 +1362,7 @@ class _KVCache:
             raise LogicError("Cannot commit block that is not full except last block")
         ssm_lc_id = self.manager._life_cycles.ssm_life_cycle_id
         should_snapshot_ssm = ssm_lc_id is not None and self._should_snapshot_ssm_block(
-            ordinal, is_last, save_last_ssm_snapshot
+            ordinal, is_last, force_ssm_snapshot
         )
         prev: RootBlock | Block
         if ordinal == 0:

@@ -57,8 +57,8 @@ from .kv_cache_transceiver import AttentionTypeCpp, create_kv_cache_transceiver
 from .llm_request import ExecutorResponse, LlmRequestState
 from .mamba_cache_manager import (BaseMambaCacheManager,
                                   CppMambaHybridCacheManager,
-                                  KVCacheManagerV2MambaHybridCacheManager,
                                   MixedMambaHybridCacheManager,
+                                  V2MambaHybridCacheManager,
                                   use_cpp_mamba_cache_manager,
                                   use_py_mamba_cache_manager)
 from .model_engine import PyTorchModelEngine
@@ -125,8 +125,40 @@ def get_kv_cache_manager_cls(
             logger.info(
                 "Using MixedMambaHybridCacheManager for hybrid mamba model")
             return MixedMambaHybridCacheManager
+        default_cls = V2MambaHybridCacheManager
+        env_override = os.environ.get('TLLM_MAMBA_MANAGER_PREFERENCE', None)
+        if env_override is not None:
+            env_override = env_override.upper()
+            if env_override == 'MIXED':
+                if kv_cache_config.enable_block_reuse:
+                    raise ValueError(
+                        "TLLM_MAMBA_MANAGER_PREFERENCE=MIXED forces "
+                        "MixedMambaHybridCacheManager, which does not support "
+                        "block reuse. Disable block reuse or use "
+                        "TLLM_MAMBA_MANAGER_PREFERENCE=V2/CPP.")
+                logger.warning(
+                    "Environment variable TLLM_MAMBA_MANAGER_PREFERENCE=MIXED "
+                    "overrides the default Mamba cache manager to "
+                    "MixedMambaHybridCacheManager.")
+                return MixedMambaHybridCacheManager
+            if env_override == 'CPP':
+                logger.warning(
+                    "Environment variable TLLM_MAMBA_MANAGER_PREFERENCE=CPP "
+                    "overrides the default Mamba cache manager to "
+                    "CppMambaHybridCacheManager.")
+                return CppMambaHybridCacheManager
+            if env_override == 'V2':
+                logger.warning(
+                    "Environment variable TLLM_MAMBA_MANAGER_PREFERENCE=V2 "
+                    "overrides the default Mamba cache manager to "
+                    "V2MambaHybridCacheManager.")
+                return V2MambaHybridCacheManager
+            logger.warning(
+                f"Unrecognized value for TLLM_MAMBA_MANAGER_PREFERENCE: {env_override}. "
+                f"Expected 'CPP', 'MIXED', or 'V2'. Using default {default_cls.__name__}."
+            )
         if kv_cache_config.enable_block_reuse:
-            return KVCacheManagerV2MambaHybridCacheManager
+            return V2MambaHybridCacheManager
         if use_cpp_mamba_cache_manager():
             logger.info(
                 "Using MixedMambaHybridCacheManager for hybrid mamba model")
@@ -136,30 +168,6 @@ def get_kv_cache_manager_cls(
             logger.info("Python transceiver detected; using "
                         "MixedMambaHybridCacheManager for hybrid mamba model")
             return MixedMambaHybridCacheManager
-        default_cls = KVCacheManagerV2MambaHybridCacheManager
-        env_override = os.environ.get('TLLM_MAMBA_MANAGER_PREFERENCE', None)
-        if env_override is not None:
-            if env_override.upper() == 'MIXED':
-                logger.warning(
-                    "Environment variable TLLM_MAMBA_MANAGER_PREFERENCE=MIXED overrides the default Mamba cache manager to MixedMambaHybridCacheManager. This may lead to increased memory usage due to lack of block reuse, but can be necessary for disaggregated setups or to avoid potential issues with the C++ manager. Set TLLM_MAMBA_MANAGER_PREFERENCE=CPP to use the CppMambaHybridCacheManager instead, which is the default for non-disaggregated setups without block reuse explicitly disabled."
-                )
-                return MixedMambaHybridCacheManager
-            elif env_override.upper() == 'CPP':
-                logger.warning(
-                    "Environment variable TLLM_MAMBA_MANAGER_PREFERENCE=CPP overrides the default Mamba cache manager to CppMambaHybridCacheManager. This enables block reuse and can reduce memory usage, but may not be compatible with disaggregated setups. Set TLLM_MAMBA_MANAGER_PREFERENCE=MIXED to use the MixedMambaHybridCacheManager instead if you encounter issues with the C++ manager or are running in a disaggregated environment."
-                )
-                return CppMambaHybridCacheManager
-            elif env_override.upper() == 'V2':
-                logger.warning(
-                    "Environment variable TLLM_MAMBA_MANAGER_PREFERENCE=V2 "
-                    "overrides the default Mamba cache manager to "
-                    "KVCacheManagerV2MambaHybridCacheManager.")
-                return KVCacheManagerV2MambaHybridCacheManager
-            else:
-                logger.warning(
-                    f"Unrecognized value for TLLM_MAMBA_MANAGER_PREFERENCE: {env_override}. "
-                    f"Expected 'CPP', 'MIXED', or 'V2'. Using default {default_cls.__name__}."
-                )
         return default_cls
     else:
         return _non_hybrid_kv_cache_manager_cls(config, kv_cache_config)
@@ -302,7 +310,7 @@ class KvCacheCreator:
                 or os.environ.get('TRTLLM_USE_PY_MAMBA', '0') == '1' \
                 or self._speculative_config is not None
             if uses_v1_mamba_route and not issubclass(
-                    cls, KVCacheManagerV2MambaHybridCacheManager):
+                    cls, V2MambaHybridCacheManager):
                 logger.warning(
                     "Block reuse does not work with MTP for hybrid linear models "
                     f"when using non-V2 Mamba cache manager {cls.__name__}")
@@ -868,7 +876,6 @@ class KvCacheCreator:
             execution_stream=self._execution_stream,
             layer_mask=spec_dec_layer_mask,
             is_disagg=self._is_disagg,
-            enable_iter_perf_stats=self._llm_args.enable_iter_perf_stats,
         )
 
         if not self._skip_est:
@@ -1003,7 +1010,6 @@ class KvCacheCreator:
             layer_mask=spec_dec_layer_mask,
             num_layers=num_draft_layers,
             is_disagg=self._is_disagg,
-            enable_iter_perf_stats=self._llm_args.enable_iter_perf_stats,
         )
 
     def _get_target_and_draft_cache_costs(
@@ -1369,7 +1375,6 @@ class KvCacheCreator:
             head_dim=head_dim,
             kv_cache_type=tensorrt_llm.bindings.internal.batch_manager.
             CacheType.CROSS,
-            enable_iter_perf_stats=self._llm_args.enable_iter_perf_stats,
         )
 
     def _needs_gpu_kv_cache_budget_split(
@@ -1545,8 +1550,7 @@ def _create_kv_cache_manager(
         num_kv_heads: Optional[Union[int, List[int]]] = None,
         head_dim: Optional[int] = None,
         kv_cache_type=None,
-        is_disagg: bool = False,
-        enable_iter_perf_stats: bool = False) -> KVCacheManager:
+        is_disagg: bool = False) -> KVCacheManager:
     """
     Returns:
         A KVCacheManager instance for the given model engine or model config
@@ -1636,10 +1640,6 @@ def _create_kv_cache_manager(
     else:
         kv_cache_dtype = str_dtype_to_binding(torch_dtype_to_str(dtype))
 
-    v2_stats_kwargs = {}
-    if issubclass(kv_cache_manager_cls, KVCacheManagerV2):
-        v2_stats_kwargs["enable_stats"] = enable_iter_perf_stats
-
     # Use provided num_layers if available, otherwise use config.
     # When layer_mask is set (e.g., KV sharing), num_layers for the cache
     # manager must equal the number of enabled (True) layers in the mask.
@@ -1690,7 +1690,6 @@ def _create_kv_cache_manager(
             execution_stream=execution_stream,
             layer_mask=layer_mask,
             is_disagg=is_disagg,
-            **v2_stats_kwargs,
         )
     elif is_nemotron_hybrid(config):
         if max_beam_width > 1:
@@ -1796,7 +1795,6 @@ def _create_kv_cache_manager(
             model_type="nemotron_hybrid",
             use_replay_state_update=use_replay,
             mamba_ssm_stochastic_rounding=mamba_ssm_stochastic_rounding,
-            **v2_stats_kwargs,
         )
     elif is_qwen3_hybrid(config):
         if max_beam_width > 1:
@@ -1841,7 +1839,6 @@ def _create_kv_cache_manager(
             is_estimating_kv_cache=estimating_kv_cache,
             execution_stream=execution_stream,
             model_type="qwen3_next",
-            **v2_stats_kwargs,
         )
     else:
         # NOTE: this is a workaround for VSWA to switch to calculate_max_num_blocks_for_vswa in KVCahceManager
@@ -1884,7 +1881,6 @@ def _create_kv_cache_manager(
             execution_stream=execution_stream,
             layer_mask=layer_mask,
             is_disagg=is_disagg,
-            **v2_stats_kwargs,
         )
     # Note: Gemma4 KV sharing cache remapping is handled in Gemma4Attention
     # via cache_layer_idx — shared layers use target layer's index for

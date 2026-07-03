@@ -24,7 +24,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from tensorrt_llm._torch.pyexecutor.kv_cache_manager_v2 import KVCacheManagerV2
-from tensorrt_llm._torch.pyexecutor.llm_request import LlmRequestState
+from tensorrt_llm._torch.pyexecutor.llm_request import LlmRequest, LlmRequestState
 from tensorrt_llm.llmapi.llm_args import CapacitySchedulerPolicy, ContextChunkingPolicy
 
 # ---------------------------------------------------------------------------
@@ -77,6 +77,14 @@ def make_ctx_request(
     req.context_remaining_length = context_remaining_length
     req.prompt_len = prompt_len or context_remaining_length
     req.context_current_position = 0
+    req.expect_snapshot_points = []
+    req.next_expected_snapshot_point = lambda: LlmRequest.next_expected_snapshot_point(req)
+    req.get_forced_context_chunk_size = (
+        lambda default_chunk_size: LlmRequest.get_forced_context_chunk_size(req, default_chunk_size)
+    )
+    req.is_forced_context_chunk_boundary = (
+        lambda chunk_size: LlmRequest.is_forced_context_chunk_boundary(req, chunk_size)
+    )
     req.num_draft_tokens = num_draft_tokens
     req.has_draft_tokens = num_draft_tokens > 0
     req.py_draft_tokens = [0] * num_draft_tokens if num_draft_tokens > 0 else []
@@ -1452,7 +1460,7 @@ class TestChunkedContext:
         assert ids(out.context_requests) == [0]
         assert req.context_chunk_size == 256
 
-    def test_force_chunk_requires_expected_snapshot_points(self):
+    def test_force_chunk_defaults_to_remaining_context_without_snapshot_points(self):
         mgr = make_kv_cache_manager(tokens_per_block=32)
         sched = make_scheduler(
             mgr,
@@ -1461,8 +1469,10 @@ class TestChunkedContext:
         )
         req = make_ctx_request(0, context_remaining_length=1176)
 
-        with pytest.raises(RuntimeError, match="expect_snapshot_points"):
-            sched.schedule_request([req], set())
+        out = sched.schedule_request([req], set())
+
+        assert ids(out.context_requests) == [0]
+        assert req.context_chunk_size == 1176
 
     def test_force_chunk_uses_next_expected_snapshot_point(self):
         mgr = make_kv_cache_manager(tokens_per_block=32)
