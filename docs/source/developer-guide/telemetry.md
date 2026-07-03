@@ -25,7 +25,7 @@ unset or when the safety sanitizer rejects the runtime value.
 
 ### `TorchLlmArgs`
 
-234 captured fields.
+235 captured fields.
 
 | Captured key | Annotation | Kind | Converter | Allowed values |
 |--------------|------------|------|-----------|----------------|
@@ -102,6 +102,7 @@ unset or when the safety sanitizer rejects the runtime value.
 | `kv_cache_config.free_gpu_memory_fraction` | `Optional[float]` | `value` |  |  |
 | `kv_cache_config.host_cache_size` | `Optional[int]` | `value` |  |  |
 | `kv_cache_config.iteration_stats_interval` | `<class 'int'>` | `value` |  |  |
+| `kv_cache_config.mamba_save_last_snapshot` | `<class 'bool'>` | `value` |  |  |
 | `kv_cache_config.mamba_ssm_cache_dtype` | `Literal['auto', 'float16', 'bfloat16', 'float32']` | `categorical` |  | `auto`, `float16`, `bfloat16`, `float32` |
 | `kv_cache_config.mamba_ssm_philox_rounds` | `<class 'int'>` | `value` |  |  |
 | `kv_cache_config.mamba_ssm_stochastic_rounding` | `<class 'bool'>` | `value` |  |  |
@@ -267,7 +268,7 @@ unset or when the safety sanitizer rejects the runtime value.
 
 ### `TrtLlmArgs`
 
-260 captured fields.
+261 captured fields.
 
 | Captured key | Annotation | Kind | Converter | Allowed values |
 |--------------|------------|------|-----------|----------------|
@@ -391,6 +392,7 @@ unset or when the safety sanitizer rejects the runtime value.
 | `kv_cache_config.free_gpu_memory_fraction` | `Optional[float]` | `value` |  |  |
 | `kv_cache_config.host_cache_size` | `Optional[int]` | `value` |  |  |
 | `kv_cache_config.iteration_stats_interval` | `<class 'int'>` | `value` |  |  |
+| `kv_cache_config.mamba_save_last_snapshot` | `<class 'bool'>` | `value` |  |  |
 | `kv_cache_config.mamba_ssm_cache_dtype` | `Literal['auto', 'float16', 'bfloat16', 'float32']` | `categorical` |  | `auto`, `float16`, `bfloat16`, `float32` |
 | `kv_cache_config.mamba_ssm_philox_rounds` | `<class 'int'>` | `value` |  |  |
 | `kv_cache_config.mamba_ssm_stochastic_rounding` | `<class 'bool'>` | `value` |  |  |
