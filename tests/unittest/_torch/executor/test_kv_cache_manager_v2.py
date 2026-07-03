@@ -29,6 +29,7 @@ class _FakeKVCache:
 def test_try_commit_blocks_commits_uncommitted_tokens_and_stops_at_context_end():
     request = SimpleNamespace(
         py_request_id=1,
+        is_dummy=False,
         is_dummy_request=False,
         context_current_position=8,
         context_remaining_length=0,
