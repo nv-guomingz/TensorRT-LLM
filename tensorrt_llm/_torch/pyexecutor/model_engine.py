@@ -113,6 +113,19 @@ class ModelEngine(ABC):
         return
 
 
+def _get_current_context_reused_tokens(request: LlmRequest,
+                                       begin_compute: int) -> int:
+    try:
+        prepopulated_prompt_len = request.prepopulated_prompt_len
+    except RuntimeError:
+        return 0
+    if prepopulated_prompt_len <= 0:
+        return 0
+    if begin_compute != prepopulated_prompt_len:
+        return 0
+    return prepopulated_prompt_len
+
+
 def _filter_piecewise_capture_num_tokens(
     candidate_num_tokens: list[int],
     max_num_tokens: int,
@@ -226,6 +239,20 @@ def _filter_cuda_graph_seq_lens(cuda_graph_seq_lens: list[int],
     return result
 
 
+_DEEP_GEMM_PDL_CONFIGURED = False
+
+
+def _configure_deep_gemm_pdl() -> None:
+    global _DEEP_GEMM_PDL_CONFIGURED
+    if _DEEP_GEMM_PDL_CONFIGURED:
+        return
+
+    from tensorrt_llm import deep_gemm
+
+    deep_gemm.set_pdl(os.environ.get("TRTLLM_ENABLE_PDL", "1") == "1")
+    _DEEP_GEMM_PDL_CONFIGURED = True
+
+
 class PyTorchModelEngine(ModelEngine):
 
     def __init__(
@@ -245,6 +272,8 @@ class PyTorchModelEngine(ModelEngine):
         model_weights_memory_tag: Optional[str] = None,
         model_weights_restore_mode=None,
     ):
+        _configure_deep_gemm_pdl()
+
         self.forward_pass_callable = None
         self.ub_buffers = None
         if llm_args.encode_only and llm_args.mm_encoder_only:
@@ -2652,10 +2681,13 @@ class PyTorchModelEngine(ModelEngine):
                     [item[1] for item in all_rank_num_tokens])
 
         # Set iteration states - batch dictionary updates
+        self.iter_states.clear()
         self.iter_states.update({
             'num_ctx_requests':
             0,
             'num_ctx_tokens':
+            0,
+            'reused_ctx_tokens':
             0,
             'num_generation_tokens':
             num_generation_tokens,
@@ -3085,6 +3117,7 @@ class PyTorchModelEngine(ModelEngine):
         context_input_ids_positions = []
         # (start_idx, end_idx, seq_slot) for first_draft requests
         first_draft_input_ids_positions = []
+        num_reused_ctx_tokens = 0
 
         def append_cross_attention_state(request: LlmRequest,
                                          project_encoder_output: bool,
@@ -3122,6 +3155,8 @@ class PyTorchModelEngine(ModelEngine):
             all_prompt_tokens = request.get_tokens(0)
             draft_lens.append(0)
             begin_compute = request.context_current_position
+            num_reused_ctx_tokens += _get_current_context_reused_tokens(
+                request, begin_compute)
             end_compute = begin_compute + request.context_chunk_size
             prompt_tokens = all_prompt_tokens[begin_compute:end_compute]
             position_ids.extend(
@@ -4048,11 +4083,20 @@ class PyTorchModelEngine(ModelEngine):
 
         num_generation_tokens = len(generation_requests) + len(
             extend_requests) + sum(draft_lens) + len(first_draft_requests)
-        self.iter_states['num_ctx_requests'] = num_ctx_requests
-        self.iter_states['num_ctx_tokens'] = num_ctx_tokens
-        self.iter_states['num_generation_tokens'] = num_generation_tokens
-        # Count the already-cached prefix for the sequences scheduled this iteration.
-        self.iter_states['cached_kv_tokens'] = sum(num_cached_tokens_per_seq)
+        self.iter_states.clear()
+        self.iter_states.update({
+            'num_ctx_requests':
+            num_ctx_requests,
+            'num_ctx_tokens':
+            num_ctx_tokens,
+            'reused_ctx_tokens':
+            num_reused_ctx_tokens,
+            'num_generation_tokens':
+            num_generation_tokens,
+            # Count the already-cached prefix for the sequences scheduled this iteration.
+            'cached_kv_tokens':
+            sum(num_cached_tokens_per_seq),
+        })
 
         if not self.is_warmup:
             self.previous_request_ids = all_gen_request_ids

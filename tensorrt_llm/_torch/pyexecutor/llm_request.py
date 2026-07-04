@@ -675,6 +675,9 @@ class LlmRequest(tensorrt_llm.bindings.internal.batch_manager.LlmRequest):
         self.py_logits_post_processors = kwargs.pop("py_logits_post_processors",
                                                     None)
         self.py_lora_path: str | None = kwargs.pop("py_lora_path", None)
+        self.py_reusable_prompt_len: int | None = kwargs.pop(
+            "py_reusable_prompt_len", None)
+        self.expect_snapshot_points: list[int] = []
         # Multimodal data
         self.py_multimodal_data = kwargs.pop("py_multimodal_data", None)
         encoder_input_tokens = kwargs.get("encoder_input_tokens")
@@ -831,6 +834,35 @@ class LlmRequest(tensorrt_llm.bindings.internal.batch_manager.LlmRequest):
             self, exclude_last_generation_logits: bool):
         self.py_result.set_exclude_last_generation_logits(
             exclude_last_generation_logits)
+
+    def next_expected_snapshot_point(self) -> int | None:
+        return min(
+            (point for point in self.expect_snapshot_points
+             if point > self.context_current_position),
+            default=None,
+        )
+
+    def get_forced_context_chunk_size(self, default_chunk_size: int) -> int:
+        if not self.expect_snapshot_points:
+            return min(self.context_remaining_length, default_chunk_size)
+        next_point = self.next_expected_snapshot_point()
+        if next_point is None:
+            return self.context_remaining_length
+        next_position = min(next_point, self.prompt_len)
+        return max(0, next_position - self.context_current_position)
+
+    def is_forced_context_chunk_boundary(self, chunk_size: int) -> bool:
+        next_position = self.context_current_position + chunk_size
+        return (next_position >= self.prompt_len
+                or next_position in self.expect_snapshot_points)
+
+    def block_reuse_commit_limit(self) -> int:
+        if not self.expect_snapshot_points:
+            return self.prompt_len
+        return min(max(self.expect_snapshot_points), self.prompt_len)
+
+    def should_save_ssm_snapshot(self, commit_end: int) -> bool:
+        return commit_end in self.expect_snapshot_points
 
     @property
     def cached_tokens(self) -> int:
@@ -1176,6 +1208,8 @@ def executor_request_to_llm_request(
         context_phase_params=executor_request.context_phase_params,
         cache_salt=executor_request.cache_salt,
         arrival_time=getattr(executor_request, "py_arrival_time", None),
+        py_reusable_prompt_len=getattr(executor_request,
+                                       "py_reusable_prompt_len", None),
         py_multimodal_data=getattr(executor_request, "py_multimodal_data",
                                    None),
         kv_cache_retention_config=executor_request.kv_cache_retention_config,

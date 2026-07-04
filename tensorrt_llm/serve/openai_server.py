@@ -97,6 +97,25 @@ from .harmony_adapter import (HarmonyAdapter, get_harmony_adapter,
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 
 
+def _has_mm_placeholders(mm_placeholder_counts: list[dict[str, int]]) -> bool:
+    return any(count > 0 for message_counts in mm_placeholder_counts
+               for count in message_counts.values())
+
+
+def _count_text_prompt_tokens(tokenizer, prompt: str,
+                              add_special_tokens: bool) -> int | None:
+    try:
+        return len(
+            tokenizer.encode(prompt, add_special_tokens=add_special_tokens))
+    except TypeError:
+        try:
+            return len(tokenizer.encode(prompt))
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
 def _build_tool_strict_guided_decoding_params(tools, tool_parser_name):
     """Build GuidedDecodingParams with structural tags for tools with strict=True.
 
@@ -1286,9 +1305,30 @@ class OpenAIServer(_VideoRoutesMixin):
                     self.multimodal_server_config,
                     request_media_io_kwargs=request.media_io_kwargs)
 
+            reusable_prompt_len = None
+            stable_prompt: Optional[str] = None
             if request.prompt_token_ids is not None:
                 prompt = request.prompt_token_ids
             else:
+                if (request.add_generation_prompt
+                        and not _has_mm_placeholders(mm_placeholder_counts)):
+                    stable_prompt = apply_chat_template(
+                        model_type=resolve_top_level_model_type(
+                            self.model_config),
+                        tokenizer=self.tokenizer,
+                        processor=self.processor,
+                        conversation=conversation,
+                        add_generation_prompt=False,
+                        mm_placeholder_counts=mm_placeholder_counts,
+                        tools=tool_dicts,
+                        documents=request.documents,
+                        chat_template=request.chat_template
+                        or self.chat_template,
+                        chat_template_kwargs=request.chat_template_kwargs or {},
+                    )
+                    reusable_prompt_len = _count_text_prompt_tokens(
+                        self.tokenizer, stable_prompt,
+                        request.add_special_tokens)
                 prompt: str = apply_chat_template(
                     model_type=resolve_top_level_model_type(self.model_config),
                     tokenizer=self.tokenizer,
@@ -1328,8 +1368,10 @@ class OpenAIServer(_VideoRoutesMixin):
                 postproc_args=postproc_args,
             )
 
-            trace_headers = (None if raw_request is None else
-                             tracing.extract_trace_headers(raw_request.headers))
+            original_trace_headers = (None if raw_request is None else
+                                      tracing.extract_trace_headers(
+                                          raw_request.headers))
+            trace_headers = original_trace_headers
 
             resolve_request_conversation_id(
                 request, None if raw_request is None else raw_request.headers)
@@ -1356,6 +1398,7 @@ class OpenAIServer(_VideoRoutesMixin):
                 conversation_params=conversation_params,
                 cache_salt=request.cache_salt,
                 trace_headers=trace_headers,
+                reusable_prompt_len=reusable_prompt_len,
                 scheduling_params=scheduling_params,
             )
             asyncio.create_task(self.await_disconnected(raw_request, promise))

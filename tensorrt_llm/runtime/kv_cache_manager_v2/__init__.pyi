@@ -159,6 +159,7 @@ LayerConfig = AttentionLayerConfig | SsmLayerConfig
 class KVCacheDesc:
     capacity: int
     history_length: int
+    ssm_snapshots: int | None = None
 
 @dataclass(slots=True)
 class BatchDesc:
@@ -349,6 +350,7 @@ class _KVCache:
         self,
         accepted_input_tokens: Sequence[TokenIdExt],
         beam_search_indices: Sequence[int] | None = None,
+        save_ssm_snapshot: bool = False,
     ) -> None: ...
     @property
     def num_committed_tokens(self) -> int: ...

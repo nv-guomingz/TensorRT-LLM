@@ -145,9 +145,14 @@ LayerConfig = AttentionLayerConfig | SsmLayerConfig
 class KVCacheDesc:
     capacity: int
     history_length: int
+    # Number of SSM state slots required by this descriptor, including the
+    # live state slot and any reusable SSM snapshots. When unset, SSM sizing
+    # keeps the previous default of one live state slot per descriptor.
+    ssm_snapshots: int | None = None
 
     def __post_init__(self) -> None:
         assert 0 <= self.history_length <= self.capacity
+        assert self.ssm_snapshots is None or self.ssm_snapshots >= 0
 
 
 # A batch of requests, working as a use case the KVCacheManager must always support.
@@ -232,7 +237,8 @@ class KVCacheManagerConfig:
     ssm_reuse_interval: int = 512
     """
     Interval (in tokens) at which SSM state is snapshotted for prefix reuse.
-    Must be a positive multiple of tokens_per_block. Only takes effect when SSM layers are present.
+    Must be 0, or a positive multiple of tokens_per_block. 0 disables regular snapshots.
+    Only takes effect when SSM layers are present.
     """
 
     swa_scratch_reuse: SwaScratchReuseConfig | None = None
@@ -273,11 +279,12 @@ class KVCacheManagerConfig:
             for buffer in layer.buffers
         )
         if any(layer.type == LayerType.SSM for layer in self.layers):
-            assert self.ssm_reuse_interval > 0, "ssm_reuse_interval must be positive"
-            assert self.ssm_reuse_interval % self.tokens_per_block == 0, (
-                f"ssm_reuse_interval ({self.ssm_reuse_interval}) must be a multiple of "
-                f"tokens_per_block ({self.tokens_per_block})"
-            )
+            assert self.ssm_reuse_interval >= 0, "ssm_reuse_interval must be non-negative"
+            if self.ssm_reuse_interval > 0:
+                assert self.ssm_reuse_interval % self.tokens_per_block == 0, (
+                    f"ssm_reuse_interval ({self.ssm_reuse_interval}) must be a multiple of "
+                    f"tokens_per_block ({self.tokens_per_block})"
+                )
             assert not self.enable_partial_reuse, (
                 "enable_partial_reuse must be False when SSM layers are present"
             )
