@@ -715,17 +715,9 @@ def create_py_executor(
     else:
         ctx_chunk_config = None
 
-    mamba_state_cache_interval = kv_cache_config.mamba_state_cache_interval
-    has_mamba_regular_snapshots = (mamba_state_cache_interval is not None
-                                   and mamba_state_cache_interval > 0)
-    if (kv_cache_config.enable_block_reuse and is_hybrid_linear(config)
-            and (has_mamba_regular_snapshots
-                 or kv_cache_config.mamba_save_last_snapshot)):
-        force_chunk_unit_size = (mamba_state_cache_interval
-                                 if has_mamba_regular_snapshots else
-                                 tokens_per_block)
+    if kv_cache_config.enable_block_reuse and is_hybrid_linear(config):
         ctx_chunk_config = (ContextChunkingPolicy.FORCE_CHUNK,
-                            force_chunk_unit_size)
+                            kv_cache_config.mamba_state_cache_interval)
 
     guided_decoder: Optional[GuidedDecoder] = None
     if guided_decoding_config is not None:

@@ -8,10 +8,8 @@ class _FakeKVCache:
         self.num_committed_tokens = num_committed_tokens
         self.committed_tokens = None
         self.stopped_committing = False
-        self.history_length = 8
-        self.capacity = 8
 
-    def commit(self, tokens, save_ssm_snapshot=False):
+    def commit(self, tokens):
         self.committed_tokens = tokens
         self.num_committed_tokens += len(tokens)
 
@@ -23,22 +21,15 @@ def test_try_commit_blocks_commits_uncommitted_tokens_and_stops_at_context_end()
     request = SimpleNamespace(
         py_request_id=1,
         is_dummy_request=False,
-        is_dummy=False,
         context_current_position=8,
         context_remaining_length=0,
-        prompt_len=8,
         get_tokens=lambda beam_id: list(range(10)),
-        block_reuse_commit_limit=lambda: 8,
-        should_save_ssm_snapshot=lambda commit_end: False,
     )
     kv_cache = _FakeKVCache(num_committed_tokens=4)
     manager = object.__new__(KVCacheManagerV2)
     manager.enable_block_reuse = True
     manager.is_draft = False
     manager.kv_cache_map = {request.py_request_id: kv_cache}
-    manager._block_reuse_committed_request_ids = set()
-    manager._block_reuse_committed_request_count = 0
-    manager._block_reuse_committed_token_count = 0
     manager._augment_tokens_for_block_reuse = lambda tokens, request, start, end: tokens[start:end]
 
     manager.try_commit_blocks(request)

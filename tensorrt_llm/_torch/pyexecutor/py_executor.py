@@ -4412,11 +4412,6 @@ class PyExecutor:
 
     @nvtx_range("_schedule")
     def _schedule(self):
-        prepare_expect_snapshot_points = getattr(
-            self.kv_cache_manager, "prepare_expect_snapshot_points", None)
-        if prepare_expect_snapshot_points is not None:
-            prepare_expect_snapshot_points(self.active_requests)
-
         scheduler_output = self.scheduler.schedule_request(
             self.active_requests, self.inflight_req_ids)
 
@@ -5301,10 +5296,8 @@ class PyExecutor:
                                           batch_outputs, beam_width,
                                           num_context_tokens)
 
-                sample_state = self.sampler.sample_async(
-                    scheduled_batch, batch_outputs,
-                    num_context_logits_prefix_sum)
-                return sample_state
+                return self.sampler.sample_async(scheduled_batch, batch_outputs,
+                                                 num_context_logits_prefix_sum)
         except Exception as e:
             traceback.print_exc()
             error_msg = str(e)

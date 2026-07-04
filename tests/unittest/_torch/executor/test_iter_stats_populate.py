@@ -102,17 +102,6 @@ class _StubRequest:
         return self._num_tokens
 
 
-class _StubPrepopulatedRequest:
-    def __init__(self, prepopulated_prompt_len):
-        self._prepopulated_prompt_len = prepopulated_prompt_len
-
-    @property
-    def prepopulated_prompt_len(self):
-        if isinstance(self._prepopulated_prompt_len, Exception):
-            raise self._prepopulated_prompt_len
-        return self._prepopulated_prompt_len
-
-
 class _StubScheduledBatch:
     def __init__(self, context_reqs=None, gen_reqs=None, paused_reqs=None):
         self.context_requests = list(context_reqs or [])
@@ -189,7 +178,6 @@ def _build_fake_self(queued_items, model_engine_iter_states, *, enable_attention
     fake.drafter = None
     fake.model_engine = types.SimpleNamespace(iter_states=model_engine_iter_states)
     fake.enable_attention_dp = enable_attention_dp
-    fake._is_stats_dummy_request = lambda req: bool(getattr(req, "is_dummy", False))
     return fake
 
 
@@ -605,15 +593,6 @@ def test_num_gen_kv_tokens_uses_scheduled_batch_stats():
 
     ifb = stats.inflight_batching_stats
     assert ifb.num_gen_kv_tokens == 1024
-
-
-def test_current_context_reused_tokens_counts_only_first_reused_chunk():
-    from tensorrt_llm._torch.pyexecutor.model_engine import _get_current_context_reused_tokens
-
-    assert _get_current_context_reused_tokens(_StubPrepopulatedRequest(256), 256) == 256
-    assert _get_current_context_reused_tokens(_StubPrepopulatedRequest(256), 512) == 0
-    assert _get_current_context_reused_tokens(_StubPrepopulatedRequest(0), 0) == 0
-    assert _get_current_context_reused_tokens(_StubPrepopulatedRequest(RuntimeError()), 256) == 0
 
 
 # ---------------------------------------------------------------------------
