@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 from typing import Callable, List, Optional, Sequence, Union
 from unittest.mock import patch
 
@@ -17,6 +18,33 @@ from ..utils import (get_model_extra_attrs,
                      set_piecewise_running)
 from .multi_stream.auto_multi_stream import multi_stream_schedule
 from .utils import get_capture_piecewise_cuda_graph_flag, is_call_function
+
+# All live PiecewiseRunner instances, across every torch.compile artifact.
+# Captured piecewise CUDA graphs bake in device pointers, so whenever the
+# buffers they reference are reallocated (e.g. the KV cache manager is torn
+# down and rebuilt after memory estimation), the stale graphs must be dropped
+# and re-captured instead of replayed.
+_piecewise_runners: "weakref.WeakSet[PiecewiseRunner]" = weakref.WeakSet()
+
+
+def reset_all_piecewise_cuda_graphs():
+    """Drop every captured piecewise CUDA graph so the next capture pass
+    re-records with the current buffer addresses."""
+    for runner in _piecewise_runners:
+        runner.reset_cuda_graphs()
+
+
+def _piecewise_boundary_ops():
+    ops = [
+        torch.ops.trtllm.attn_custom_op_inplace.default,
+        torch.ops.trtllm.mla_custom_op_inplace.default,
+        torch.ops.trtllm.mla_dsa_attn_inplace.default,
+    ]
+    try:
+        ops.append(torch.ops.trtllm.gdn_custom_op_inplace.default)
+    except AttributeError:
+        pass
+    return ops
 
 
 class PiecewiseInterpreter(Interpreter):
@@ -161,6 +189,17 @@ class PiecewiseRunner(object):
                 callable=default_callable,
             )
 
+        _piecewise_runners.add(self)
+
+    def reset_cuda_graphs(self):
+        """Drop captured CUDA graphs (keep compiled callables) so the next
+        capture pass re-records them with the current buffer addresses."""
+        for entry in self.entries.values():
+            entry.cuda_graph = None
+            entry.output = None
+            entry.input_addresses = None
+            entry.output_addresses = None
+
     def __call__(self, *args):
         runtime_num_of_token = None
         if self.runtime_num_tokens_idx != None:
@@ -256,25 +295,21 @@ def piecewise_optimizer(
     node_to_graph_id = {}
     idx = 0
     exclude_modules_id = []
+    piecewise_boundary_ops = _piecewise_boundary_ops()
 
     for node in graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        if (not stop_partition and is_call_function(node, [
-                torch.ops.trtllm.attn_custom_op_inplace.default,
-                torch.ops.trtllm.mla_custom_op_inplace.default,
-                torch.ops.trtllm.mla_dsa_attn_inplace.default,
-                torch.ops.aten.index.Tensor,
-                torch.ops.aten.cumsum.default,
-        ])):
+        is_boundary = is_call_function(node, piecewise_boundary_ops)
+        stop_target = is_call_function(node, [
+            torch.ops.aten.index.Tensor,
+            torch.ops.aten.cumsum.default,
+        ])
+        if not stop_partition and (is_boundary or stop_target):
             idx += 1
             node_to_graph_id[node] = idx
             exclude_modules_id.append(idx)
-            if (node.target != torch.ops.trtllm.attn_custom_op_inplace.default
-                    and node.target
-                    != torch.ops.trtllm.mla_custom_op_inplace.default
-                    and node.target
-                    != torch.ops.trtllm.mla_dsa_attn_inplace.default):
+            if not is_boundary:
                 # We only know it is safe to continue splitting after attention
                 stop_partition = True
             else:

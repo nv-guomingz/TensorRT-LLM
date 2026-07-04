@@ -43,6 +43,7 @@ from ..attention_backend.utils import get_attention_backend
 from ..attention_backend.vanilla import VanillaAttentionMetadata
 from ..autotuner import AutoTuner, autotune
 from ..compilation.backend import Backend
+from ..compilation.piecewise_optimizer import reset_all_piecewise_cuda_graphs
 from ..compilation.utils import capture_piecewise_cuda_graph
 from ..distributed import Distributed
 from ..distributed.communicator import init_pp_comm
@@ -1052,6 +1053,16 @@ class PyTorchModelEngine(ModelEngine):
                     f"[ModelEngine::warmup] Skipping warmup for cp_type: {None if cp_type is None else cp_type.name}."
                 )
                 return
+
+        # Warmup may run more than once (before and after the KV cache manager
+        # is rebuilt for memory estimation). Piecewise CUDA graphs captured in
+        # an earlier pass bake in device pointers that may since have been
+        # freed (e.g. MoERunner.clear_all_workspaces below releases the C++
+        # MoE workspaces), so drop them up front — before any warmup forward
+        # (general/autotuner) can replay a stale graph — and let this pass
+        # re-capture with the current buffer addresses.
+        if self._torch_compile_piecewise_cuda_graph and self._torch_compile_enabled:
+            reset_all_piecewise_cuda_graphs()
 
         # Create AutoTuner singleton in eager context before any compiled forward.
         # Otherwise the first get() can happen inside torch.compile tracing and
@@ -3819,7 +3830,11 @@ class PyTorchModelEngine(ModelEngine):
             self.previous_kv_lens_offsets_cuda *= 0
 
         position_ids = self._apply_position_id_offset(position_ids)
-        if self.use_mrope and mrope_position_ids:
+        # Use the (3,1,N) MRoPE layout whenever the model declares MRoPE, even
+        # for text-only batches: keeping position_ids rank-consistent between
+        # warmup and serving keeps torch.compile guards stable, so piecewise
+        # CUDA graphs captured at warmup remain usable at runtime.
+        if self.use_mrope:
             # Mixed batches may have only some requests with multimodal MRoPE
             # data. Seed the full (3,1,N) buffer from scalar position_ids
             # (text-only tokens get the same value on all 3 axes), then
@@ -3979,7 +3994,10 @@ class PyTorchModelEngine(ModelEngine):
         if attn_metadata.padded_num_tokens is not None:
             self.input_ids_cuda[total_num_tokens:padded_num_tokens].fill_(0)
             virtual_num_tokens = padded_num_tokens
-            if self.use_mrope and mrope_position_ids:
+            # Match the rank of the unpadded branch: MRoPE models always use
+            # the (3,1,N) layout (see the seeding block above), so the padded
+            # view must stay 3D as well to keep torch.compile guards stable.
+            if self.use_mrope:
                 # Zero-fill padding on dim 2 (token dim) of (3,1,N) buffer.
                 self.mrope_position_ids_cuda[:, :, total_num_tokens:
                                              padded_num_tokens].fill_(0)
@@ -5322,6 +5340,7 @@ class PyTorchModelEngine(ModelEngine):
         assert attrs is not None, "Model extra attrs is not set"
         attrs["attention_metadata"] = weakref.ref(kwargs['attn_metadata'])
         attrs.update(self.model.model_config.extra_attrs)
+        attrs["spec_metadata"] = kwargs.get('spec_metadata', None)
 
         if self._torch_compile_backend is not None:
             # Register aux streams and events to model extra attrs.
