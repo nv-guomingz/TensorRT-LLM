@@ -4412,6 +4412,11 @@ class PyExecutor:
 
     @nvtx_range("_schedule")
     def _schedule(self):
+        prepare_expect_snapshot_points = getattr(
+            self.kv_cache_manager, "prepare_expect_snapshot_points", None)
+        if prepare_expect_snapshot_points is not None:
+            prepare_expect_snapshot_points(self.active_requests)
+
         scheduler_output = self.scheduler.schedule_request(
             self.active_requests, self.inflight_req_ids)
 
@@ -4606,20 +4611,44 @@ class PyExecutor:
         if timeout_ms is None:
             return
 
-        def flag_if_kv_transfer_timed_out(req: LlmRequest, type: str) -> None:
+        def flag_if_kv_transfer_timed_out(
+                req: LlmRequest,
+                request_type: str,
+                is_context_transfer: bool = False) -> None:
             current_time = time.time()
             if req.py_kv_transfer_start_time is None:
-                return
+                should_start_timer = False
+                if is_context_transfer:
+                    transceiver = self.kv_cache_transceiver
+                    should_start_timer = (
+                        transceiver.should_start_context_transfer_timer(req))
+                    if (not should_start_timer
+                            and transceiver.has_context_transfer_wait_timed_out(
+                                req, current_time)):
+                        if not req.py_kv_transfer_timed_out:
+                            logger.warning(
+                                f"Terminating {request_type} request "
+                                f"{req.py_request_id} because KV cache "
+                                f"receiver did not request data before the "
+                                f"context receiver-wait timeout")
+                            req.py_kv_transfer_timed_out = True
+                        return
+                if should_start_timer:
+                    req.py_kv_transfer_start_time = current_time
+                else:
+                    return
             elapsed_time = (current_time - req.py_kv_transfer_start_time) * 1000
             if elapsed_time > timeout_ms and not req.py_kv_transfer_timed_out:
                 logger.warning(
-                    f"Terminating {type} request {req.py_request_id} due to KV "
+                    f"Terminating {request_type} request {req.py_request_id} due to KV "
                     f"cache transfer timeout: elapsed {elapsed_time:.0f}ms > "
                     f"kv_transfer_timeout_ms={timeout_ms}ms")
                 req.py_kv_transfer_timed_out = True
 
         for req in self.async_transfer_manager.requests_in_transfer().values():
-            flag_if_kv_transfer_timed_out(req, "context")
+            flag_if_kv_transfer_timed_out(req,
+                                          "context",
+                                          is_context_transfer=True)
 
         for req in self.active_requests:
             if req.is_disagg_generation_transmission_in_progress:
@@ -5001,7 +5030,9 @@ class PyExecutor:
                     self.kv_cache_transceiver.respond_and_send_async(req)
 
                     if self.kv_cache_transceiver.kv_transfer_timeout_ms is not None:
-                        req.py_kv_transfer_start_time = time.time()
+                        if self.kv_cache_transceiver.should_start_context_transfer_timer(
+                                req):
+                            req.py_kv_transfer_start_time = time.time()
 
         if self.kv_connector_manager:
             if not self.disable_overlap_scheduler:
@@ -5296,8 +5327,10 @@ class PyExecutor:
                                           batch_outputs, beam_width,
                                           num_context_tokens)
 
-                return self.sampler.sample_async(scheduled_batch, batch_outputs,
-                                                 num_context_logits_prefix_sum)
+                sample_state = self.sampler.sample_async(
+                    scheduled_batch, batch_outputs,
+                    num_context_logits_prefix_sum)
+                return sample_state
         except Exception as e:
             traceback.print_exc()
             error_msg = str(e)
@@ -5496,10 +5529,20 @@ class PyExecutor:
         self.waiting_queue.remove_by_ids(canceled_req_ids_set)
 
         still_pending_canceled_ids = []
+        still_pending_canceled_ids_set = set()
+        processed_canceled_req_ids = set()
+
+        def mark_cancel_pending(req_id: int):
+            if req_id not in still_pending_canceled_ids_set:
+                still_pending_canceled_ids.append(req_id)
+                still_pending_canceled_ids_set.add(req_id)
+
         for request in self.active_requests:
-            req_id = request.py_request_id if not request.is_child else request.parent_request_id
+            req_id = (request.py_request_id
+                      if not request.is_child else request.parent_request_id)
             if req_id not in canceled_req_ids_set:
                 continue
+            processed_canceled_req_ids.add(req_id)
 
             is_cancelled = self._try_cancel_request(request)
             if is_cancelled:
@@ -5508,7 +5551,26 @@ class PyExecutor:
                 request.finish_by_reason(FinishReason.CANCELLED)
                 request.decoding_iter = request.py_decoding_iter
             else:
-                still_pending_canceled_ids.append(req_id)
+                mark_cancel_pending(req_id)
+
+        if self.kv_cache_transceiver is not None:
+            requests_in_transfer = self.async_transfer_manager.requests_in_transfer(
+            )
+            for request in list(requests_in_transfer.values()):
+                req_id = (request.py_request_id if not request.is_child else
+                          request.parent_request_id)
+                if (req_id not in canceled_req_ids_set
+                        or req_id in processed_canceled_req_ids):
+                    continue
+
+                is_cancelled = self._try_cancel_request(request)
+                if is_cancelled:
+                    request.py_kv_transfer_start_time = None
+                    request.py_kv_transfer_timed_out = False
+                    request.state = LlmRequestState.DISAGG_CONTEXT_COMPLETE
+                    self._end_transfer_and_maybe_terminate(request)
+                else:
+                    mark_cancel_pending(req_id)
 
         # Clear list of requests marked for cancellation and add back those that failed to cancel.
         self.canceled_req_ids.clear()

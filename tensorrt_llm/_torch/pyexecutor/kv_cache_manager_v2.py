@@ -100,6 +100,7 @@ from .scheduler import ScheduledRequests
 if TYPE_CHECKING:
     from tensorrt_llm._torch.attention_backend.interface import AttentionMetadata
 
+
 KV_CACHE_ITERATION_STATS_DELTA_FIELDS = tuple(
     field.name for field in fields(KVCacheIterationStatsDelta)
 )
@@ -121,6 +122,8 @@ class Role:
     VALUE = DataRole("value")
     KEY_BLOCK_SCALE = DataRole("key_block_scale")
     VALUE_BLOCK_SCALE = DataRole("value_block_scale")
+    SSM_STATE = DataRole("ssm_state")
+    CONV_STATE = DataRole("conv_state")
     # Sparse-attention per-layer index-K cache (MiniMax-M3 and similar
     # sparse-block-selection backends). Registered as a native V2
     # BufferConfig on sparse layers via the extra_buffers_per_layer hook on
@@ -688,6 +691,7 @@ class KVCacheManagerV2(BaseResourceManager):
             self._kv_reserve_draft_tokens = max(self.max_total_draft_tokens, draft_loop_tokens)
 
         self.event_buffer_max_size = kv_cache_config.event_buffer_max_size
+        self.kv_cache_config = kv_cache_config
         self.enable_stats = enable_stats
         kv_cache_event_hash_algo = get_effective_kv_cache_event_hash_algo(
             kv_cache_config.kv_cache_event_hash_algo,
@@ -973,6 +977,13 @@ class KVCacheManagerV2(BaseResourceManager):
 
         self.enable_block_reuse = kv_cache_config.enable_block_reuse
         self.enable_partial_reuse = kv_cache_config.enable_partial_reuse
+        self._block_reuse_committed_request_count = 0
+        self._block_reuse_committed_token_count = 0
+        self._block_reuse_hit_request_count = 0
+        self._block_reuse_hit_token_count = 0
+        self._block_reuse_miss_request_count = 0
+        self._block_reuse_miss_token_count = 0
+        self._block_reuse_committed_request_ids: set[int] = set()
         self.disk_prefetch_num_reqs = kv_cache_config.disk_prefetch_num_reqs
 
         # With pipeline parallelism, multiple microbatches can be in-flight
@@ -1023,63 +1034,64 @@ class KVCacheManagerV2(BaseResourceManager):
         else:
             for pool_id in range(self.num_pools):
                 layer_id = self.impl.layer_grouping[pool_id][0]
+                index_role = self._get_index_role_for_pool(pool_id)
                 kv_cache_pool_pointers_list.append(
                     [
                         self.impl.get_mem_pool_base_address(
-                            layer_id, Role.KEY, PageIndexMode.SHARED
+                            layer_id, index_role, PageIndexMode.SHARED
                         ),
                         0,
                     ]
                 )
                 if self.dtype == DataType.NVFP4:
+                    block_scale_role = self._get_block_scale_role_for_pool(pool_id)
                     block_scale_pool_pointers_list.append(
                         [
                             self.impl.get_mem_pool_base_address(
-                                layer_id, Role.KEY_BLOCK_SCALE, PageIndexMode.SHARED
-                            ),
+                                layer_id, block_scale_role, PageIndexMode.SHARED
+                            )
+                            if block_scale_role is not None
+                            else 0,
                             0,
                         ]
                     )
 
             for layer_id in typed_range(LayerId(self.num_local_layers)):
                 layer_group_id = self.impl.get_layer_group_id(layer_id)
-                if self.dtype != DataType.NVFP4:
-                    key_base_addr = kv_cache_pool_pointers_list[layer_group_id][0]
-                    addr_offset = (
-                        self.impl.get_mem_pool_base_address(
-                            layer_id, Role.KEY, PageIndexMode.SHARED
-                        )
-                        - key_base_addr
-                    )
-                else:
-                    key_base_addr = kv_cache_pool_pointers_list[layer_group_id][0]
-                    block_scale_base_addr = block_scale_pool_pointers_list[layer_group_id][0]
-                    addr_offset = (
-                        self.impl.get_mem_pool_base_address(
-                            layer_id, Role.KEY, PageIndexMode.SHARED
-                        )
-                        - key_base_addr
-                    )
-                    block_scale_addr_offset = (
-                        self.impl.get_mem_pool_base_address(
-                            layer_id, Role.KEY_BLOCK_SCALE, PageIndexMode.SHARED
-                        )
-                        - block_scale_base_addr
-                    )
-                    block_scale_offset = exact_div(
-                        block_scale_addr_offset,
-                        self.get_layer_bytes_per_token(layer_id, Role.KEY_BLOCK_SCALE)
-                        * self.kv_factor
-                        * self.tokens_per_block,
-                    )
-                offset = exact_div(
-                    addr_offset,
-                    self.get_layer_bytes_per_token(layer_id, Role.KEY)
-                    * self.kv_factor
-                    * self.tokens_per_block,
+                index_role = self._get_index_role_for_pool(layer_group_id)
+                index_base_addr = kv_cache_pool_pointers_list[layer_group_id][0]
+                addr_offset = (
+                    self.impl.get_mem_pool_base_address(layer_id, index_role, PageIndexMode.SHARED)
+                    - index_base_addr
                 )
+                offset_divisor = self.impl.get_page_stride(layer_id, index_role)
+                if self._get_value_role_for_pool(layer_group_id) is not None:
+                    offset_divisor *= self.kv_factor
+                offset = exact_div(addr_offset, offset_divisor)
 
-                if self.dtype == DataType.NVFP4:
+                if self.dtype != DataType.NVFP4:
+                    block_scale_offset = None
+                else:
+                    block_scale_role = self._get_block_scale_role_for_pool(layer_group_id)
+                    if block_scale_role is None:
+                        block_scale_offset = None
+                    else:
+                        block_scale_base_addr = block_scale_pool_pointers_list[layer_group_id][0]
+                        block_scale_addr_offset = (
+                            self.impl.get_mem_pool_base_address(
+                                layer_id, block_scale_role, PageIndexMode.SHARED
+                            )
+                            - block_scale_base_addr
+                        )
+                        block_scale_divisor = self.impl.get_page_stride(layer_id, block_scale_role)
+                        if self._get_value_role_for_pool(layer_group_id) is not None:
+                            block_scale_divisor *= self.kv_factor
+                        block_scale_offset = exact_div(
+                            block_scale_addr_offset,
+                            block_scale_divisor,
+                        )
+
+                if block_scale_offset is not None:
                     assert block_scale_offset == offset, (
                         "Block scale offset and offset should be the same"
                     )
@@ -1114,12 +1126,16 @@ class KVCacheManagerV2(BaseResourceManager):
         )
         for pool_id in range(self.num_pools):
             layer_id = self.impl.layer_grouping[pool_id][0]
-            self.index_scales[pool_id] = self.impl.get_page_index_scale(layer_id, Role.KEY)
-            if self.kv_cache_type != CacheTypeCpp.SELFKONLY:
+            index_role = self._get_index_role_for_pool(pool_id)
+            self.index_scales[pool_id] = self.impl.get_page_index_scale(layer_id, index_role)
+            value_role = self._get_value_role_for_pool(pool_id)
+            if value_role is not None:
                 self.kv_offset[pool_id] = exact_div(
-                    self.impl.get_mem_pool_base_address(layer_id, Role.VALUE, PageIndexMode.SHARED)
-                    - self.impl.get_mem_pool_base_address(layer_id, Role.KEY, PageIndexMode.SHARED),
-                    self.impl.get_page_stride(layer_id, Role.KEY),
+                    self.impl.get_mem_pool_base_address(layer_id, value_role, PageIndexMode.SHARED)
+                    - self.impl.get_mem_pool_base_address(
+                        layer_id, index_role, PageIndexMode.SHARED
+                    ),
+                    self.impl.get_page_stride(layer_id, index_role),
                 )
             else:
                 self.kv_offset[pool_id] = 0
@@ -1213,6 +1229,17 @@ class KVCacheManagerV2(BaseResourceManager):
         )
         context_extra_quota = context_tokens * context_swa_size_per_token
         return int(generation_quota + context_extra_quota)
+
+    def _get_index_role_for_pool(self, pool_id: int) -> DataRole:
+        return Role.KEY
+
+    def _get_value_role_for_pool(self, pool_id: int) -> Optional[DataRole]:
+        return Role.VALUE if self.kv_cache_type != CacheTypeCpp.SELFKONLY else None
+
+    def _get_block_scale_role_for_pool(self, pool_id: int) -> Optional[DataRole]:
+        if self.dtype != DataType.NVFP4:
+            return None
+        return Role.KEY_BLOCK_SCALE if self._get_index_role_for_pool(pool_id) == Role.KEY else None
 
     def _get_event_num_blocks_per_cache_level(
         self,
@@ -1913,6 +1940,34 @@ class KVCacheManagerV2(BaseResourceManager):
         self._restore_page_index_bufs(req_id, kv_cache)
         return True
 
+    def _mark_context_position_as_history(self, request: LlmRequest, kv_cache) -> None:
+        """Advance history without making later tokens reusable."""
+        history_length = request.context_current_position
+        if history_length <= kv_cache.history_length:
+            return
+        capacity = max(kv_cache.capacity, history_length)
+        if not kv_cache.resize(capacity, history_length=history_length):
+            raise ValueError(
+                "Failed to resize history length of KV cache for request "
+                f"{request.py_request_id} to {history_length} tokens"
+            )
+
+    def _record_block_reuse_commit(
+        self,
+        request: LlmRequest,
+        commit_start: int,
+        commit_end: int,
+    ) -> None:
+        if commit_end <= commit_start:
+            return
+        if request.is_dummy:
+            return
+        request_id = request.py_request_id
+        if request_id not in self._block_reuse_committed_request_ids:
+            self._block_reuse_committed_request_ids.add(request_id)
+            self._block_reuse_committed_request_count += 1
+        self._block_reuse_committed_token_count += commit_end - commit_start
+
     def prepare_context(self, req: LlmRequest) -> bool:
         """Create _KVCache, handle block reuse, and resume. Does NOT resize.
 
@@ -1950,6 +2005,16 @@ class KVCacheManagerV2(BaseResourceManager):
                 if kv_cache is None:
                     return False
                 kv_cache.cuda_stream = self._stream.cuda_stream
+                if self.enable_block_reuse and tokens is not None:
+                    reused_tokens = min(kv_cache.num_committed_tokens, len(tokens))
+                    missed_tokens = len(tokens) - reused_tokens
+                    if not req.is_dummy:
+                        if reused_tokens > 0:
+                            self._block_reuse_hit_request_count += 1
+                            self._block_reuse_hit_token_count += reused_tokens
+                        else:
+                            self._block_reuse_miss_request_count += 1
+                        self._block_reuse_miss_token_count += missed_tokens
 
             if not self.enable_block_reuse:
                 kv_cache.stop_committing()
@@ -2541,7 +2606,10 @@ class KVCacheManagerV2(BaseResourceManager):
             for window_size in sorted(windows)
         }
 
-        pool_group_ids = sorted(set(windows_by_pool_group) | set(pool_group_deltas))
+        all_pool_group_ids = set(range(len(primary_stats)))
+        pool_group_ids = sorted(
+            all_pool_group_ids | set(windows_by_pool_group) | set(pool_group_deltas)
+        )
         stats_by_pool_group = {
             pool_group_id: self._build_pool_group_iteration_stats(
                 pool_group_id,
@@ -2719,27 +2787,56 @@ class KVCacheManagerV2(BaseResourceManager):
 
         return requests
 
-    def try_commit_blocks(self, request: LlmRequest) -> None:
+    def try_commit_blocks(self, request: LlmRequest, kv_cache=None) -> None:
         should_block_reuse = (
             self.enable_block_reuse and not self.is_draft and not request.is_dummy_request
         )
         if not should_block_reuse:
             return
 
-        kv_cache = self.kv_cache_map.get(request.py_request_id)
+        if kv_cache is None:
+            kv_cache = self.kv_cache_map.get(request.py_request_id)
         if kv_cache is None:
             return
 
-        if request.context_current_position > kv_cache.num_committed_tokens:
+        commit_limit = request.block_reuse_commit_limit()
+        commit_end = min(request.context_current_position, commit_limit)
+        save_snapshot = request.should_save_ssm_snapshot(commit_end)
+        if commit_end > kv_cache.num_committed_tokens:
+            commit_start = kv_cache.num_committed_tokens
             tokens = self._augment_tokens_for_block_reuse(
                 request.get_tokens(DEFAULT_BEAM_INDEX),
                 request,
-                start=kv_cache.num_committed_tokens,
-                end=request.context_current_position,
+                start=commit_start,
+                end=commit_end,
             )
-            kv_cache.commit(tokens)
+            kv_cache.commit(
+                tokens,
+                save_ssm_snapshot=save_snapshot,
+            )
+            self._record_block_reuse_commit(
+                request,
+                commit_start,
+                commit_end,
+            )
+        if request.context_current_position >= commit_limit:
+            self._mark_context_position_as_history(request, kv_cache)
         if request.context_remaining_length == 0:
             kv_cache.stop_committing()
+
+    def _log_block_reuse_summary(self) -> None:
+        if not self.enable_block_reuse:
+            return
+
+        logger.info(
+            "KVCacheManagerV2 block reuse summary: "
+            f"committed_tokens={self._block_reuse_committed_token_count}, "
+            f"committed_requests={self._block_reuse_committed_request_count}, "
+            f"hit_tokens={self._block_reuse_hit_token_count}, "
+            f"hit_requests={self._block_reuse_hit_request_count}, "
+            f"miss_tokens={self._block_reuse_miss_token_count}, "
+            f"miss_requests={self._block_reuse_miss_request_count}"
+        )
 
     def release_index_slot(self, request_id: int) -> None:
         """Release IndexMapper slot early while keeping KV cache blocks allocated.
@@ -2761,9 +2858,12 @@ class KVCacheManagerV2(BaseResourceManager):
         self._allocated_draft_lens.pop(request.py_request_id, None)
         kv_cache = self.kv_cache_map.pop(request.py_request_id, None)
         if kv_cache is None:
+            self._block_reuse_committed_request_ids.discard(request.py_request_id)
             self.impl.clear_stats_excluded(request.py_request_id)
             return
         kv_cache.discard_pending_stats()
+        self.try_commit_blocks(request, kv_cache)
+        self._block_reuse_committed_request_ids.discard(request.py_request_id)
         kv_cache.close()
         self.impl.clear_stats_excluded(request.py_request_id)
         if request.py_request_id in self._early_freed_index_requests:
@@ -2917,6 +3017,7 @@ class KVCacheManagerV2(BaseResourceManager):
         return bool(has_invalid_values)
 
     def shutdown(self):
+        self._log_block_reuse_summary()
         for kv_cache in self.kv_cache_map.values():
             kv_cache.close()
         self.kv_cache_map.clear()
