@@ -2533,6 +2533,18 @@ class V2MambaHybridCacheManager(KVCacheManagerV2, MambaHybridCacheManager):
             self._n_groups_per_rank = mamba_n_groups // tp_size
             conv_dim = conv_dim // tp_size
             nheads = nheads // tp_size
+            ng_ds_local = self._n_groups_per_rank * mamba_d_state
+            d_inner_local = mamba_head_dim * nheads
+            if model_type == "qwen3_next":
+                self.conv_section_dims = [
+                    ng_ds_local, ng_ds_local, d_inner_local
+                ]
+            elif model_type == "nemotron_hybrid":
+                self.conv_section_dims = [
+                    d_inner_local, ng_ds_local, ng_ds_local
+                ]
+            else:
+                raise ValueError(f"Unsupported model type: {model_type}")
             self.conv_state_shape = [conv_dim, mamba_d_conv - 1]
             self.ssm_state_shape = [nheads, mamba_head_dim, mamba_d_state]
             self.ssm_count = math.prod(self.ssm_state_shape)
@@ -2544,6 +2556,7 @@ class V2MambaHybridCacheManager(KVCacheManagerV2, MambaHybridCacheManager):
                 "No local mamba layers for this rank, skipping mamba state views"
             )
             self._n_groups_per_rank = 0
+            self.conv_section_dims = []
             self.conv_state_shape = []
             self.ssm_state_shape = []
             self.ssm_count = 0

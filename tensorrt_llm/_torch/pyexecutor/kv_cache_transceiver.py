@@ -11,7 +11,8 @@ from tensorrt_llm.mapping import Mapping
 
 from .llm_request import LlmRequest
 from .mamba_cache_manager import (BaseMambaCacheManager,
-                                  CppMambaHybridCacheManager)
+                                  CppMambaHybridCacheManager,
+                                  V2MambaHybridCacheManager)
 from .resource_manager import KVCacheManager
 
 CacheTransceiverCpp = tensorrt_llm.bindings.internal.batch_manager.CacheTransceiver
@@ -70,10 +71,17 @@ def create_kv_cache_transceiver(
             f"UCX_CUDA_IPC_ENABLE_MNNVL=n, UCX_RNDV_SCHEME=put_zcopy and/or unset UCX_NET_DEVICES upon server "
             f"hangs or lower-than-expected performance.")
 
-    # Select transceiver implementation based on transceiver_runtime
+    # Select transceiver implementation based on transceiver_runtime.
     # transceiver_runtime == None or "CPP" -> use C++ transceiver (default)
-    # transceiver_runtime == "PYTHON" -> use Python transceiver
-    if cache_transceiver_config.transceiver_runtime == "PYTHON":
+    # transceiver_runtime == "PYTHON" -> use Python transceiver.
+    #
+    # V2MambaHybridCacheManager is backed by the Python KVCacheManagerV2 core,
+    # not the C++ BaseKVCacheManager binding required by CacheTransceiverCpp.
+    use_python_transceiver = (
+        cache_transceiver_config.transceiver_runtime == "PYTHON"
+        or isinstance(mamba_cache_manager, V2MambaHybridCacheManager))
+
+    if use_python_transceiver:
         # Python transceiver currently only supports NIXL and DEFAULT backend
         if cache_transceiver_config.backend not in ("DEFAULT", "NIXL"):
             raise ValueError(
@@ -144,6 +152,15 @@ class KvCacheTransceiver(ABC):
     def commit_blocks_for_reuse(self, req: LlmRequest) -> None:
         """Commit received KV blocks to the radix tree for prefix reuse. No-op by default."""
 
+    def should_start_context_transfer_timer(self, req: LlmRequest) -> bool:
+        """Return whether context-side KV transfer timeout should start now."""
+        return True
+
+    def has_context_transfer_wait_timed_out(self, req: LlmRequest,
+                                            current_time: float) -> bool:
+        """Return whether a context send session waited too long for receiver readiness."""
+        return False
+
     def shutdown(self):
         """Shut down the transceiver and release registered resources."""
 
@@ -185,7 +202,9 @@ class BindKvCacheTransceiver(KvCacheTransceiver):
         rnn_state_manager = None
         rnn_layer_num_per_pp_rank = []
         if mamba_cache_manager is not None:
-            if isinstance(mamba_cache_manager, CppMambaHybridCacheManager):
+            if isinstance(
+                    mamba_cache_manager,
+                (CppMambaHybridCacheManager, V2MambaHybridCacheManager)):
                 # Unified pool path: RNN model config is in LinearAttentionMetadata,
                 # C++ reads it from BlockManager during CacheTransceiver construction.
                 rnn_layer_num_per_pp_rank = dist.pp_allgather(

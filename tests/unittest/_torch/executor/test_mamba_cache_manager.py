@@ -10,6 +10,8 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from tensorrt_llm._torch.disaggregation.resource.kv_extractor import build_page_table_from_manager
+from tensorrt_llm._torch.disaggregation.resource.page import AttentionLayerGroup, MambaLayerGroup
 from tensorrt_llm._torch.pyexecutor._util import get_kv_cache_manager_cls
 from tensorrt_llm._torch.pyexecutor.cuda_graph_runner import CUDA_GRAPH_DUMMY_REQUEST_ID
 from tensorrt_llm._torch.pyexecutor.kv_cache_manager_v2 import KVCacheManagerV2, Role
@@ -635,6 +637,7 @@ def _build_v2_hybrid_with_mamba_layer(
     num_mamba_layers=1,
     spec_config=None,
     use_replay_state_update=False,
+    model_type="nemotron_hybrid",
 ):
     """Construct a real V2MambaHybridCacheManager."""
     num_attention_layers = 1
@@ -665,6 +668,7 @@ def _build_v2_hybrid_with_mamba_layer(
         layer_mask=attn_mask,
         vocab_size=1024,
         use_replay_state_update=use_replay_state_update,
+        model_type=model_type,
     )
 
 
@@ -768,6 +772,44 @@ def test_v2_hybrid_mamba_state_views_use_logical_slots():
         mgr.add_dummy_requests([123, 456], token_nums=[8, 8], is_gen=False)
         indices = mgr.get_state_indices([123, 456], [False, False])
         assert all(0 <= index < ssm_slots for index in indices)
+    finally:
+        mgr.shutdown()
+
+
+@skip_no_cuda
+def test_v2_hybrid_disagg_page_table_preserves_lifecycle_indices():
+    mgr = _build_v2_hybrid_with_mamba_layer(max_batch_size=4, num_mamba_layers=2)
+    try:
+        page_table = build_page_table_from_manager(mgr)
+
+        assert len(page_table.layer_groups) == mgr.impl._storage.num_life_cycles
+        assert isinstance(page_table.layer_groups[0], MambaLayerGroup)
+        assert isinstance(page_table.layer_groups[1], AttentionLayerGroup)
+
+        requests = mgr.add_dummy_requests([123], token_nums=[64], is_gen=False)
+        assert len(requests) == 1
+        attention_blocks = list(
+            mgr.kv_cache_map[123].get_aggregated_page_indices(1, valid_only=True)
+        )
+        assert attention_blocks
+    finally:
+        mgr.shutdown()
+
+
+@skip_no_cuda
+def test_v2_hybrid_disagg_page_table_uses_qwen3_next_conv_sections():
+    mgr = _build_v2_hybrid_with_mamba_layer(max_batch_size=4, model_type="qwen3_next")
+    try:
+        page_table = build_page_table_from_manager(mgr)
+        mamba_group = page_table.layer_groups[0]
+
+        assert isinstance(mamba_group, MambaLayerGroup)
+        d_conv_m1 = mgr.conv_state_shape[1]
+        conv_elem_size = mgr.all_conv_states[0].element_size()
+        assert mamba_group.conv_section_bytes == [
+            dim * d_conv_m1 * conv_elem_size for dim in mgr.conv_section_dims
+        ]
+        assert mgr.conv_section_dims == [8, 8, 32]
     finally:
         mgr.shutdown()
 

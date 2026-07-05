@@ -637,16 +637,6 @@ def create_py_executor(
         cache_transceiver_config.max_tokens_in_buffer = net_max_seq_len
 
     config = model_engine.model.model_config.pretrained_config
-    if is_hybrid_linear(config) and kv_cache_config.enable_block_reuse and (
-            cache_transceiver_config is not None
-            and cache_transceiver_config.backend is not None
-            and cache_transceiver_config.transceiver_runtime == "PYTHON"):
-        logger.warning(
-            "Disabling block reuse for MambaHybridCacheManager-based models when disagg + Python transceiver enabled"
-        )
-        kv_cache_config.enable_block_reuse = False
-        _set_model_engines_cache_reuse([model_engine, draft_model_engine],
-                                       False)
     if is_mla(config):
         if model_engine.model.model_config.enable_flash_mla:
             tokens_per_block = 64
@@ -855,11 +845,8 @@ def create_py_executor(
 
         if is_disagg and is_hybrid:
             # NOTE: TRTLLM_USE_PY_MAMBA is an agg-mode-only override and has
-            # no effect in disagg. The disagg manager choice is driven solely
-            # by transceiver_runtime: PYTHON => PythonMambaCacheManager,
-            # otherwise CppMambaCacheManager. Clear the var here so the
-            # mutual-exclusion check in use_cpp_mamba_cache_manager() does
-            # not fire after we force TRTLLM_USE_CPP_MAMBA=1 below.
+            # no effect in disagg. The disagg manager choice is driven by
+            # get_kv_cache_manager_cls and cache_transceiver_config.
             if os.environ.pop("TRTLLM_USE_PY_MAMBA", "0") == "1":
                 logger.warning(
                     "TRTLLM_USE_PY_MAMBA is ignored in disaggregated serving; "
@@ -867,7 +854,7 @@ def create_py_executor(
                     "to select PythonMambaCacheManager.")
             else:
                 logger.info("Disaggregated serving with hybrid model detected. "
-                            "Enabling CppMambaHybridCacheManager.")
+                            "Using the configured Mamba cache manager.")
 
         # Get draft config for one-engine speculative decoding if available
         draft_config = getattr(model_engine.model, 'draft_config', None)
