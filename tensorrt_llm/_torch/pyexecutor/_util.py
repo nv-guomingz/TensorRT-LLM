@@ -164,11 +164,10 @@ def get_kv_cache_manager_cls(
             logger.info(
                 "Using MixedMambaHybridCacheManager for hybrid mamba model")
             return MixedMambaHybridCacheManager
-        if (cache_transceiver_config is not None
-                and cache_transceiver_config.transceiver_runtime == "PYTHON"):
-            logger.info("Python transceiver detected; using "
-                        "MixedMambaHybridCacheManager for hybrid mamba model")
-            return MixedMambaHybridCacheManager
+        # transceiver_runtime == "PYTHON" needs no manager override: the
+        # Python transceiver (KvCacheTransceiverV2) drives the default
+        # V2MambaHybridCacheManager natively. Mixed remains available via
+        # TLLM_MAMBA_MANAGER_PREFERENCE=MIXED.
         return default_cls
     else:
         return _non_hybrid_kv_cache_manager_cls(config, kv_cache_config)
