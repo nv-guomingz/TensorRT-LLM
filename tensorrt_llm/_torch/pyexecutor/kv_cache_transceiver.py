@@ -77,11 +77,26 @@ def create_kv_cache_transceiver(
     #
     # V2MambaHybridCacheManager is backed by the Python KVCacheManagerV2 core,
     # not the C++ BaseKVCacheManager binding required by CacheTransceiverCpp.
+    is_v2_mamba_hybrid = isinstance(mamba_cache_manager,
+                                    V2MambaHybridCacheManager)
     use_python_transceiver = (
         cache_transceiver_config.transceiver_runtime == "PYTHON"
-        or isinstance(mamba_cache_manager, V2MambaHybridCacheManager))
+        or is_v2_mamba_hybrid)
+
+    if is_v2_mamba_hybrid and cache_transceiver_config.transceiver_runtime == "CPP":
+        logger.warning(
+            "cache_transceiver_config.transceiver_runtime='CPP' is ignored: "
+            "V2MambaHybridCacheManager is backed by the Python "
+            "KVCacheManagerV2 core and requires the Python transceiver "
+            "(KvCacheTransceiverV2).")
 
     if use_python_transceiver:
+        if isinstance(mamba_cache_manager, CppMambaHybridCacheManager):
+            raise ValueError(
+                "transceiver_runtime='PYTHON' cannot drive "
+                "CppMambaHybridCacheManager (C++ pool backed). Use "
+                "transceiver_runtime='CPP', or select the V2 manager "
+                "(TLLM_MAMBA_MANAGER_PREFERENCE=V2).")
         # Python transceiver currently only supports NIXL and DEFAULT backend
         if cache_transceiver_config.backend not in ("DEFAULT", "NIXL"):
             raise ValueError(
