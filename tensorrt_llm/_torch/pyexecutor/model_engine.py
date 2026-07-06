@@ -43,7 +43,6 @@ from ..attention_backend.utils import get_attention_backend
 from ..attention_backend.vanilla import VanillaAttentionMetadata
 from ..autotuner import AutoTuner, autotune
 from ..compilation.backend import Backend
-from ..compilation.piecewise_optimizer import reset_all_piecewise_cuda_graphs
 from ..compilation.utils import capture_piecewise_cuda_graph
 from ..distributed import Distributed
 from ..distributed.communicator import init_pp_comm
@@ -1053,16 +1052,6 @@ class PyTorchModelEngine(ModelEngine):
                     f"[ModelEngine::warmup] Skipping warmup for cp_type: {None if cp_type is None else cp_type.name}."
                 )
                 return
-
-        # Warmup may run more than once (before and after the KV cache manager
-        # is rebuilt for memory estimation). Piecewise CUDA graphs captured in
-        # an earlier pass bake in device pointers that may since have been
-        # freed (e.g. MoERunner.clear_all_workspaces below releases the C++
-        # MoE workspaces), so drop them up front — before any warmup forward
-        # (general/autotuner) can replay a stale graph — and let this pass
-        # re-capture with the current buffer addresses.
-        if self._torch_compile_piecewise_cuda_graph and self._torch_compile_enabled:
-            reset_all_piecewise_cuda_graphs()
 
         # Create AutoTuner singleton in eager context before any compiled forward.
         # Otherwise the first get() can happen inside torch.compile tracing and
@@ -2170,6 +2159,8 @@ class PyTorchModelEngine(ModelEngine):
         self._init_max_num_tokens()
 
     def _release_cuda_graphs(self):
+        if self._torch_compile_backend is not None:
+            self._torch_compile_backend.clear_piecewise_cuda_graphs()
         if hasattr(self,
                    'cuda_graph_runner') and self.cuda_graph_runner is not None:
             self.cuda_graph_runner.clear()

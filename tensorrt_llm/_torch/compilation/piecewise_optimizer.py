@@ -1,5 +1,4 @@
 import dataclasses
-import weakref
 from typing import Callable, List, Optional, Sequence, Union
 from unittest.mock import patch
 
@@ -18,20 +17,6 @@ from ..utils import (get_model_extra_attrs,
                      set_piecewise_running)
 from .multi_stream.auto_multi_stream import multi_stream_schedule
 from .utils import get_capture_piecewise_cuda_graph_flag, is_call_function
-
-# All live PiecewiseRunner instances, across every torch.compile artifact.
-# Captured piecewise CUDA graphs bake in device pointers, so whenever the
-# buffers they reference are reallocated (e.g. the KV cache manager is torn
-# down and rebuilt after memory estimation), the stale graphs must be dropped
-# and re-captured instead of replayed.
-_piecewise_runners: "weakref.WeakSet[PiecewiseRunner]" = weakref.WeakSet()
-
-
-def reset_all_piecewise_cuda_graphs():
-    """Drop every captured piecewise CUDA graph so the next capture pass
-    re-records with the current buffer addresses."""
-    for runner in _piecewise_runners:
-        runner.reset_cuda_graphs()
 
 
 def _piecewise_boundary_ops():
@@ -75,6 +60,7 @@ class PiecewiseInterpreter(Interpreter):
         self.enable_inductor = enable_inductor
         self.num_events = 0
         self.max_num_streams = max_num_streams
+        self.runners: List["PiecewiseRunner"] = []
 
     def run(self, *args):
         fake_args = [
@@ -117,7 +103,7 @@ class PiecewiseInterpreter(Interpreter):
                 self.num_events = max(self.num_events, num_events)
                 submod.recompile()
 
-            self.module.__dict__[target] = PiecewiseRunner(
+            runner = PiecewiseRunner(
                 submod,
                 target,
                 self.compile_time_num_tokens,
@@ -130,6 +116,8 @@ class PiecewiseInterpreter(Interpreter):
                 self.piecewise_runner_idx == 0,
                 self.piecewise_runner_idx == self.piecewise_runner_num - 1,
             )
+            self.module.__dict__[target] = runner
+            self.runners.append(runner)
             self.piecewise_runner_idx += 1
         return output
 
@@ -189,16 +177,16 @@ class PiecewiseRunner(object):
                 callable=default_callable,
             )
 
-        _piecewise_runners.add(self)
-
-    def reset_cuda_graphs(self):
-        """Drop captured CUDA graphs (keep compiled callables) so the next
-        capture pass re-records them with the current buffer addresses."""
+    def clear_cuda_graphs(self):
+        """Release captures while retaining buckets for a later warmup."""
         for entry in self.entries.values():
+            if entry.cuda_graph is not None:
+                entry.cuda_graph.reset()
             entry.cuda_graph = None
-            entry.output = None
+            entry.warmup_count = 0
             entry.input_addresses = None
             entry.output_addresses = None
+            entry.output = None
 
     def __call__(self, *args):
         runtime_num_of_token = None
@@ -287,7 +275,7 @@ def piecewise_optimizer(
     capture_num_tokens: Sequence[int],
     graph_pool_handle: tuple[int, int],
     max_num_streams: int = 1,
-) -> tuple[GraphModule, int]:
+) -> tuple[GraphModule, int, List["PiecewiseRunner"]]:
     graph_pool_handle = torch.cuda.graph_pool_handle()
     graph = gm.graph
 
@@ -335,4 +323,4 @@ def piecewise_optimizer(
 
     interpreter.run(*example_inputs)
 
-    return gm, interpreter.num_events
+    return gm, interpreter.num_events, interpreter.runners
