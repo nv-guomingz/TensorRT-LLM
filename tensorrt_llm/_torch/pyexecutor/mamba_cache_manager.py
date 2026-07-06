@@ -3174,6 +3174,24 @@ class V2MambaHybridCacheManager(KVCacheManagerV2, MambaHybridCacheManager):
         if self.local_num_mamba_layers == 0:
             return
         n = len(self.requests)
+        # The attention-DP dummy-pad path
+        # (py_executor._pad_attention_dp_dummy_request -> add_dummy_requests)
+        # extends the previous iteration's self.requests, so n can
+        # transiently exceed the max_batch-sized index tables and index past
+        # their end (IndexError at index == max_batch; observed on Qwen3.5
+        # hybrid disagg CTX workers with attention-DP at max_batch 8/16).
+        # Grow the tables to fit; the sizing fix ultimately belongs in the
+        # add_dummy_requests bookkeeping.
+        if n > self._host_state_indices.shape[0]:
+            logger.warning(
+                "V2MambaHybrid state-index tables grown "
+                f"{self._host_state_indices.shape[0]} -> {n} "
+                "(attention-DP dummy-request overflow guard)")
+            self.cuda_state_indices = torch.zeros([n],
+                                                  dtype=torch.int32,
+                                                  device="cuda")
+            self._host_state_indices = torch.zeros(
+                [n], dtype=torch.int32, pin_memory=prefer_pinned())
         self._host_state_indices.zero_()
         if n > 0:
             for i, req in enumerate(self.requests):
