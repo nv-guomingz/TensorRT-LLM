@@ -116,6 +116,11 @@ def _count_text_prompt_tokens(tokenizer, prompt: str,
         return None
 
 
+# [PERF EXPERIMENT lingjiew 2026-07-09] sentinel: chat fast path disabled for a
+# given (template, kwargs) key after a failed tokenizer-boundary self-check.
+_CHAT_FASTPATH_FALLBACK = object()
+
+
 def _build_tool_strict_guided_decoding_params(tools, tool_parser_name):
     """Build GuidedDecodingParams with structural tags for tools with strict=True.
 
@@ -1208,6 +1213,116 @@ class OpenAIServer(_VideoRoutesMixin):
             logger.info("Iteration stats collector loop cancelled")
             raise
 
+    def _render_and_tokenize_chat(self, request, conversation,
+                                  mm_placeholder_counts, tool_dicts):
+        """CPU-heavy chat preprocessing; runs inside ``asyncio.to_thread``.
+
+        [PERF EXPERIMENT lingjiew 2026-07-09] The former inline path rendered
+        the chat template twice (stable prompt for ``reusable_prompt_len`` +
+        full prompt) and tokenized the full text twice (count + inside
+        ``generate_async``), all on the server's single event loop — measured
+        3.8 s/req of queueing at C32 (58% of TTFT). This method:
+          1. runs in a worker thread, freeing the event loop (HF fast
+             tokenizers release the GIL during encode);
+          2. renders ONCE without the generation prompt, tokenizes ONCE, and
+             appends the per-template cached generation-prompt suffix ids,
+             returning token ids so ``generate_async`` skips its tokenize.
+        A one-time probe per (template, kwargs) verifies
+        ``encode(stable)+encode(suffix) == encode(full)`` — BPE merges cannot
+        cross the boundary when the suffix starts with a special token (true
+        for Qwen ``<|im_start|>``). On any mismatch the key falls back to the
+        legacy double-render path permanently.
+
+        Returns ``(prompt, reusable_prompt_len)`` where ``prompt`` is a token
+        id list (fast path) or the rendered string (fallback).
+        """
+
+        def render(add_generation_prompt: bool) -> str:
+            return apply_chat_template(
+                model_type=resolve_top_level_model_type(self.model_config),
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                conversation=conversation,
+                add_generation_prompt=add_generation_prompt,
+                mm_placeholder_counts=mm_placeholder_counts,
+                tools=tool_dicts,
+                documents=request.documents,
+                chat_template=request.chat_template or self.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs or {},
+            )
+
+        if not (request.add_generation_prompt
+                and not _has_mm_placeholders(mm_placeholder_counts)):
+            return render(request.add_generation_prompt), None
+
+        stable_prompt = render(add_generation_prompt=False)
+        if getattr(request, "truncate_prompt_tokens", None) is not None:
+            # Token-id submission would bypass the input processor's
+            # truncation; keep such requests on the legacy string path.
+            return render(request.add_generation_prompt), \
+                _count_text_prompt_tokens(self.tokenizer, stable_prompt,
+                                          request.add_special_tokens)
+        cache = self.__dict__.setdefault("_chat_fastpath_suffix_ids", {})
+        key = (
+            hash(request.chat_template) if request.chat_template else 0,
+            bool(tool_dicts),
+            bool(request.documents),
+            bool(request.add_special_tokens),
+            repr(sorted((request.chat_template_kwargs or {}).items())),
+        )
+        entry = cache.get(key)
+
+        if entry is None:
+            try:
+                full_prompt = render(add_generation_prompt=True)
+                ids_full = self.tokenizer.encode(
+                    full_prompt,
+                    add_special_tokens=request.add_special_tokens)
+                if full_prompt.startswith(stable_prompt):
+                    suffix = full_prompt[len(stable_prompt):]
+                    ids_stable = self.tokenizer.encode(
+                        stable_prompt,
+                        add_special_tokens=request.add_special_tokens)
+                    ids_suffix = self.tokenizer.encode(
+                        suffix, add_special_tokens=False)
+                    if list(ids_stable) + list(ids_suffix) == list(ids_full):
+                        # setdefault: first probe wins — a racing FAILED probe
+                        # for the same key must not be overwritten.
+                        cache.setdefault(key, list(ids_suffix))
+                        logger.info(
+                            "[chat-fastpath] generation-prompt suffix cached "
+                            f"({suffix!r}, {len(ids_suffix)} tokens); "
+                            "single-render token-id path enabled")
+                        return list(ids_full), len(ids_stable)
+                cache.setdefault(key, _CHAT_FASTPATH_FALLBACK)
+                logger.warning(
+                    "[chat-fastpath] boundary self-check failed; legacy "
+                    "double-render path kept for this template key")
+                return full_prompt, _count_text_prompt_tokens(
+                    self.tokenizer, stable_prompt,
+                    request.add_special_tokens)
+            except Exception:
+                cache.setdefault(key, _CHAT_FASTPATH_FALLBACK)
+                logger.warning(
+                    "[chat-fastpath] probe raised; legacy path kept",
+                    exc_info=True)
+                # Do NOT consult the cache again here — return via the
+                # legacy path directly (a racing successful probe must not
+                # fast-path a conversation whose full render just raised).
+                return render(request.add_generation_prompt), \
+                    _count_text_prompt_tokens(self.tokenizer, stable_prompt,
+                                              request.add_special_tokens)
+
+        entry = cache.get(key)
+        if entry is _CHAT_FASTPATH_FALLBACK:
+            reusable = _count_text_prompt_tokens(
+                self.tokenizer, stable_prompt, request.add_special_tokens)
+            return render(request.add_generation_prompt), reusable
+
+        ids_stable = self.tokenizer.encode(
+            stable_prompt, add_special_tokens=request.add_special_tokens)
+        return list(ids_stable) + entry, len(ids_stable)
+
     async def openai_chat(self, request: ChatCompletionRequest,
                           raw_request: Request) -> Response:
 
@@ -1306,41 +1421,16 @@ class OpenAIServer(_VideoRoutesMixin):
                     request_media_io_kwargs=request.media_io_kwargs)
 
             reusable_prompt_len = None
-            stable_prompt: Optional[str] = None
             if request.prompt_token_ids is not None:
                 prompt = request.prompt_token_ids
             else:
-                if (request.add_generation_prompt
-                        and not _has_mm_placeholders(mm_placeholder_counts)):
-                    stable_prompt = apply_chat_template(
-                        model_type=resolve_top_level_model_type(
-                            self.model_config),
-                        tokenizer=self.tokenizer,
-                        processor=self.processor,
-                        conversation=conversation,
-                        add_generation_prompt=False,
-                        mm_placeholder_counts=mm_placeholder_counts,
-                        tools=tool_dicts,
-                        documents=request.documents,
-                        chat_template=request.chat_template
-                        or self.chat_template,
-                        chat_template_kwargs=request.chat_template_kwargs or {},
-                    )
-                    reusable_prompt_len = _count_text_prompt_tokens(
-                        self.tokenizer, stable_prompt,
-                        request.add_special_tokens)
-                prompt: str = apply_chat_template(
-                    model_type=resolve_top_level_model_type(self.model_config),
-                    tokenizer=self.tokenizer,
-                    processor=self.processor,
-                    conversation=conversation,
-                    add_generation_prompt=request.add_generation_prompt,
-                    mm_placeholder_counts=mm_placeholder_counts,
-                    tools=tool_dicts,
-                    documents=request.documents,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs or {},
-                )
+                # [PERF EXPERIMENT lingjiew 2026-07-09] render + tokenize moved
+                # off the event loop; single render + cached generation-prompt
+                # suffix replaces the former render x2 / encode x2. See
+                # _render_and_tokenize_chat.
+                prompt, reusable_prompt_len = await asyncio.to_thread(
+                    self._render_and_tokenize_chat, request, conversation,
+                    mm_placeholder_counts, tool_dicts)
             prompt = prompt_inputs(prompt)
 
             mm_data, mm_embeddings = await mm_coroutines
